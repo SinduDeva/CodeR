@@ -1,5 +1,5 @@
 
-# Code Reviewer & Impact Analyzer
+# Code R
 
 A sophisticated pre-commit safety net for developers that provides conversational code reviews and deep impact analysis.
 
