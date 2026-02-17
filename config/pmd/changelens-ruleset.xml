@@ -1,0 +1,1207 @@
+<?xml version="1.0"?>
+<ruleset name="ChangeLens Rules"
+         xmlns="http://pmd.sourceforge.net/ruleset/2.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://pmd.sourceforge.net/ruleset/2.0.0 https://pmd.sourceforge.io/ruleset_2_0_0.xsd">
+
+    <description>
+        ChangeLens PMD ruleset - covers null safety, exception handling, logging,
+        performance, code quality, and bug patterns.
+        Replaces custom regex-based validations with battle-tested PMD rules.
+
+        Compatible with PMD 7.20.0 and later.
+        Updated XPath rules to use PMD 7 attribute names (@ConstValue, @ValueAsInt, @ValueAsDouble).
+    </description>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         NULL SAFETY
+         Covers: chained method calls, .equals() on null, Optional misuse
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- Detects .equals() called on literals in wrong order (use "QS".equals(x) instead of x.equals("QS")) -->
+    <rule ref="category/java/bestpractices.xml/LiteralsFirstInComparisons"/>
+
+    <!-- Detects missing null checks -->
+    <rule ref="category/java/errorprone.xml/NullAssignment"/>
+
+    <!-- Detects broken null checks -->
+    <rule ref="category/java/errorprone.xml/BrokenNullCheck"/>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         EXCEPTION HANDLING
+         Covers: empty catch blocks, catching Throwable, generic Exception
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- Empty catch block - silently swallowed exceptions -->
+    <rule ref="category/java/errorprone.xml/EmptyCatchBlock">
+        <properties>
+            <property name="allowCommentedBlocks" value="true"/>
+            <property name="allowExceptionNameRegex" value="^(ignored|expected)$"/>
+        </properties>
+    </rule>
+
+    <!-- Catching Throwable (catches JVM errors like OutOfMemoryError) -->
+    <!-- Note: AvoidCatchingThrowable is deprecated and scheduled for removal in PMD 8.0.0 -->
+    <rule ref="category/java/errorprone.xml/AvoidCatchingThrowable"/>
+
+    <!-- Catching generic Exception instead of specific types -->
+    <rule ref="category/java/errorprone.xml/AvoidCatchingGenericException"/>
+
+    <!-- Avoid throwing raw Exception/Throwable/Error -->
+    <rule ref="category/java/design.xml/AvoidThrowingRawExceptionTypes"/>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         LOGGING
+         Covers: System.out usage, sensitive data patterns
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- System.out.println instead of logger -->
+    <rule ref="category/java/bestpractices.xml/SystemPrintln"/>
+
+    <!-- Detects System.out and System.err usage -->
+    <rule ref="category/java/bestpractices.xml/AvoidPrintStackTrace"/>
+
+    <!-- Guard log statements for performance -->
+    <rule ref="category/java/bestpractices.xml/GuardLogStatement"/>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         PERFORMANCE
+         Covers: String concat in loops, Thread.sleep, inefficient patterns
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- String concatenation inside loops (use StringBuilder) -->
+    <rule ref="category/java/performance.xml/ConsecutiveLiteralAppends"/>
+    <rule ref="category/java/performance.xml/InefficientStringBuffering"/>
+    <rule ref="category/java/performance.xml/AppendCharacterWithChar"/>
+
+    <!-- Inefficient use of String operations -->
+    <rule ref="category/java/performance.xml/StringInstantiation"/>
+    <rule ref="category/java/performance.xml/StringToString"/>
+
+    <!-- Boxed type creation inefficiencies -->
+    <rule ref="category/java/codestyle.xml/UnnecessaryBoxing"/>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         CODE QUALITY
+         Covers: hardcoded values, TODO/FIXME, magic numbers
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- Hardcoded IP addresses -->
+    <rule ref="category/java/bestpractices.xml/AvoidUsingHardCodedIP"/>
+
+    <!-- Magic numbers without explanation -->
+    <!-- Uncomment if desired - can be noisy:
+    <rule ref="category/java/errorprone.xml/AvoidLiteralsInIfCondition">
+        <properties>
+            <property name="ignoreMagicNumbers" value="-1,0,1,2"/>
+        </properties>
+    </rule>
+    -->
+
+    <!-- TODO/FIXME markers (custom XPath rule) -->
+    <rule name="TodoComment"
+          language="java"
+          message="TODO/FIXME comment found - resolve before committing"
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>Detects TODO and FIXME comments in code.</description>
+        <priority>3</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //Comment[contains(@Text, 'TODO') or contains(@Text, 'FIXME') or contains(@Text, 'HACK') or contains(@Text, 'XXX')]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         BUG PATTERNS
+         Covers: resource leaks, equals/hashCode, collection modification,
+                 boxed type comparison, BigDecimal equality
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- Resource leaks - missing try-with-resources / close() -->
+    <rule ref="category/java/bestpractices.xml/UseTryWithResources"/>
+
+    <!-- equals/hashCode contract mismatch -->
+    <rule ref="category/java/errorprone.xml/OverrideBothEqualsAndHashcode"/>
+
+    <!-- Comparing objects with == instead of .equals() -->
+    <rule ref="category/java/errorprone.xml/CompareObjectsWithEquals"/>
+
+    <!-- Using == on Strings -->
+    <rule ref="category/java/errorprone.xml/UseEqualsToCompareStrings"/>
+
+    <!-- Cloneable not implemented correctly -->
+    <rule ref="category/java/errorprone.xml/CloneMethodMustImplementCloneable"/>
+
+    <!-- Return empty collections instead of null -->
+    <rule ref="category/java/errorprone.xml/ReturnEmptyCollectionRatherThanNull"/>
+
+    <!-- Method returns modified static collection (concurrency risk) -->
+    <rule ref="category/java/errorprone.xml/AvoidAccessibilityAlteration"/>
+
+    <!-- Use Arrays.asList() instead of tight loops when copying array elements to a List -->
+    <rule ref="category/java/performance.xml/UseArraysAsList"/>
+
+    <!-- Singleton pattern issues -->
+    <rule ref="category/java/errorprone.xml/NonStaticInitializer"/>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         BUG PATTERNS - ADVANCED (source-level replacements for SpotBugs/Error Prone)
+         These XPath rules detect patterns that normally require bytecode
+         analysis, but are recognizable from source structure alone.
+         No build/compilation needed.
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- Chained method calls - NullPointerException risk
+         Detects a.getX().getY() patterns where intermediate result may be null.
+         Priority 1 = MUST FIX (matches your [!!] severity) -->
+    <rule name="ChainedMethodCallNullRisk"
+          language="java"
+          message="Chained method call detected - intermediate result may be null, risking NullPointerException. Consider null checks or Optional."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Detects chains like obj.getA().getB() where getA() could return null.
+            This is one of the most common NullPointerException patterns in Java.
+            Fix: add null checks, use Optional, or use safe navigation patterns.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodCall[
+                    MethodCall[
+                    matches(@MethodName, '^(get|find|fetch|load|resolve|lookup|retrieve|read|parse|decode|extract|obtain|acquire)[A-Z].*')
+                    ]
+                    and matches(@MethodName, '^(get|find|fetch|load|resolve|lookup|retrieve|read|parse|decode|extract|obtain|acquire|equals|toString|hashCode|compareTo|contains|isEmpty|size|length)[A-Z]?.*')
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Optional.get() without isPresent() check
+         Replaces Error Prone OptionalNotPresent -->
+    <rule name="OptionalGetWithoutIsPresent"
+          language="java"
+          message="Optional.get() called without isPresent() check. Use orElse(), orElseGet(), orElseThrow(), or ifPresent() instead."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Calling Optional.get() without first checking isPresent() throws
+            NoSuchElementException if the Optional is empty. Use orElse(),
+            orElseGet(), orElseThrow(), or ifPresent() instead.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodCall[@MethodName='get'][
+                    MethodCall[@MethodName='of' or @MethodName='ofNullable' or @MethodName='empty']
+                    or (
+                    ancestor::Block and not(
+                    ancestor::Block//MethodCall[@MethodName='isPresent']
+                    or ancestor::Block//MethodCall[@MethodName='isEmpty']
+                    )
+                    )
+                    ]
+                    [ancestor::MethodDeclaration//ClassType[
+                    pmd-java:typeIs('java.util.Optional')
+                    ] or preceding::*//ClassType[pmd-java:typeIs('java.util.Optional')]]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- BigDecimal.equals() pitfall - use compareTo() == 0 instead
+         Replaces Error Prone BigDecimalEquals and SpotBugs MDM_BIGDECIMAL_EQUALS -->
+    <rule name="BigDecimalEqualsPitfall"
+          language="java"
+          message="BigDecimal.equals() compares value AND scale (2.0 != 2.00). Use compareTo() == 0 for numeric equality."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            BigDecimal.equals() considers 2.0 and 2.00 as NOT equal because they
+            have different scales. For numeric comparison, use compareTo() == 0.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodCall[@MethodName='equals'][
+                    (preceding-sibling::*//ClassType[pmd-java:typeIs('java.math.BigDecimal')]
+                    or ancestor::MethodDeclaration//LocalVariableDeclaration//ClassType[pmd-java:typeIs('java.math.BigDecimal')])
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Swallowed InterruptedException - must restore interrupt flag
+         Replaces Error Prone InterruptedExceptionSwallowed -->
+    <rule name="SwallowedInterruptedException"
+          language="java"
+          message="InterruptedException caught but interrupt flag not restored. Add Thread.currentThread().interrupt() in the catch block."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            When catching InterruptedException, the thread's interrupt flag is cleared.
+            If you don't re-interrupt the thread, callers higher in the stack won't know
+            an interrupt occurred. Always call Thread.currentThread().interrupt() in the
+            catch block.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //CatchClause[
+                    CatchFormalParameter//ClassType[@SimpleName='InterruptedException']
+                    and not(Block//MethodCall[@MethodName='interrupt'])
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Double-checked locking without volatile
+         Replaces SpotBugs DC_DOUBLECHECK -->
+    <rule name="DoubleCheckedLockingWithoutVolatile"
+          language="java"
+          message="Possible double-checked locking pattern. Ensure the field is declared volatile, or use a thread-safe initialization pattern."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Double-checked locking without volatile is broken in Java. The JVM
+            can reorder instructions so another thread sees a partially constructed
+            object. Declare the field volatile, or use an enum singleton / holder pattern.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //SynchronizedStatement[
+                    Block//IfStatement//NullLiteral
+                    and ancestor::MethodDeclaration//IfStatement//NullLiteral
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Thread.sleep() in production code
+         Replaces SpotBugs WA_NOT_IN_LOOP (partially) -->
+    <rule name="ThreadSleepInProductionCode"
+          language="java"
+          message="Thread.sleep() in production code. Use ScheduledExecutorService, CompletableFuture.delayedExecutor(), or event-driven patterns instead."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Thread.sleep() blocks the current thread and is almost always wrong in
+            production code. It wastes resources, is not interruptible-friendly,
+            and makes code harder to test. Use scheduling or async patterns instead.
+        </description>
+        <priority>2</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodCall[@MethodName='sleep'][
+                    TypeExpression/ClassType[@SimpleName='Thread']
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Collection modified while iterating (ConcurrentModificationException risk)
+         Replaces SpotBugs PZ_DONT_REUSE_ENTRY_OBJECTS_IN_ITERATORS -->
+    <rule name="CollectionModifiedDuringIteration"
+          language="java"
+          message="Collection may be modified during for-each iteration, risking ConcurrentModificationException. Use Iterator.remove() or collect-then-modify pattern."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Modifying a collection (add/remove) while iterating it with a for-each
+            loop throws ConcurrentModificationException. Use an explicit Iterator
+            with Iterator.remove(), or collect items to remove and modify after the loop.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //ForeachStatement[
+                    Block//MethodCall[
+                    (@MethodName='remove' or @MethodName='add' or @MethodName='addAll' or @MethodName='removeAll' or @MethodName='clear')
+                    ]
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Boxed type comparison with == or != (identity vs value)
+         Replaces Error Prone BoxedPrimitiveEquality and SpotBugs RC_REF_COMPARISON -->
+    <rule name="BoxedTypeIdentityComparison"
+          language="java"
+          message="Boxed type (Integer/Long/Boolean/etc.) compared with == or !=. This compares object identity, not value. Use .equals() or unbox first."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Boxed primitives (Integer, Long, Double, Boolean) compared with == test
+            object identity, not value. Integer caching only covers -128 to 127, so
+            new Integer(200) == new Integer(200) is false. Always use .equals() or
+            .intValue() for comparisons.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //InfixExpression[(@Operator='==' or @Operator='!=')
+                    and .//VariableAccess[
+                    ancestor::MethodDeclaration//LocalVariableDeclaration//ClassType[
+                    @SimpleName='Integer' or @SimpleName='Long' or @SimpleName='Double'
+                    or @SimpleName='Float' or @SimpleName='Short' or @SimpleName='Byte'
+                    or @SimpleName='Character' or @SimpleName='Boolean'
+                    ]
+                    ]
+                    and not(.//NullLiteral)
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Logging placeholder mismatch ({} count vs argument count) -->
+    <rule name="LoggingPlaceholderMismatch"
+          language="java"
+          message="Logging placeholder count ({}) may not match the number of arguments. Verify format string matches arguments."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            When using SLF4J/Logback, the number of {} placeholders in the format
+            string must match the number of arguments. A mismatch means some data
+            won't appear in logs or extra args are wasted.
+        </description>
+        <priority>2</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodCall[
+                    (@MethodName='info' or @MethodName='debug' or @MethodName='warn' or @MethodName='error' or @MethodName='trace')
+                    and ArgumentList/StringLiteral[contains(@ConstValue, '{}')]
+                    and ArgumentList[count(*) > 2]
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Method returning Optional should never return null -->
+    <rule name="OptionalMethodReturnsNull"
+          language="java"
+          message="Method with Optional return type returns null. Return Optional.empty() instead."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            A method declared to return Optional should never return null.
+            This defeats the purpose of Optional and forces callers to null-check
+            an Optional, which is the exact problem Optional was designed to solve.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodDeclaration[
+                    ResultType//ClassType[@SimpleName='Optional']
+                    and Block//ReturnStatement/NullLiteral
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- List.get(0) without size/isEmpty check -->
+    <rule name="UncheckedListAccess"
+          language="java"
+          message="List.get() called without checking if the list is empty. This risks IndexOutOfBoundsException."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Calling list.get(0) or list.get(index) without first verifying the list
+            has elements risks IndexOutOfBoundsException. Check isEmpty() or size()
+            before accessing elements by index.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodCall[@MethodName='get'][
+                    ArgumentList/NumericLiteral[@ValueAsInt=0]
+                    and not(
+                    ancestor::Block//MethodCall[@MethodName='isEmpty']
+                    or ancestor::Block//MethodCall[@MethodName='size']
+                    or ancestor::IfStatement//MethodCall[@MethodName='isEmpty']
+                    or ancestor::IfStatement//MethodCall[@MethodName='size']
+                    )
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Logging inside loops (performance risk) -->
+    <rule name="LoggingInsideLoop"
+          language="java"
+          message="Logging inside a loop can cause log explosion and performance issues. Consider logging a summary after the loop instead."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Logging inside loops (for, while, do-while, forEach) can produce massive
+            log output, impacting performance and making logs hard to read. Log a
+            summary count or batch result after the loop instead.
+        </description>
+        <priority>2</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    (//ForStatement | //ForeachStatement | //WhileStatement | //DoStatement)
+                    //MethodCall[@MethodName='info' or @MethodName='debug' or @MethodName='warn' or @MethodName='error' or @MethodName='trace']
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- String concatenation with + in loops -->
+    <rule name="StringConcatInLoop"
+          language="java"
+          message="String concatenation with + inside a loop creates a new String object each iteration. Use StringBuilder instead."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            String concatenation using + inside loops creates a new StringBuilder
+            and String object each iteration. For loops with many iterations, this
+            causes excessive garbage collection. Use a single StringBuilder.
+        </description>
+        <priority>2</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    (//ForStatement | //ForeachStatement | //WhileStatement | //DoStatement)
+                    //AssignmentExpression[@Operator='+=']/VariableAccess[
+                    ancestor::MethodDeclaration//LocalVariableDeclaration[
+                    //ClassType[@SimpleName='String']
+                    ]
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SPRING BOOT SPECIFIC (custom XPath rules)
+         Covers: @Transactional on private, field injection
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- Field injection detected - prefer constructor injection -->
+    <rule name="AvoidFieldInjection"
+          language="java"
+          message="Avoid field injection (@Autowired on fields). Use constructor injection instead."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Spring field injection makes testing harder and hides dependencies.
+            Use constructor injection instead.
+        </description>
+        <priority>2</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //FieldDeclaration[preceding-sibling::Annotation[pmd-java:typeIs('org.springframework.beans.factory.annotation.Autowired')]]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SECURITY
+         Covers: hardcoded credentials patterns
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- Hardcoded credentials detection (custom XPath) -->
+    <rule name="HardcodedCredentials"
+          language="java"
+          message="Possible hardcoded credential detected. Use environment variables or a secrets manager."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Detects variable names that suggest hardcoded credentials
+            (password, secret, apiKey, token, etc.) assigned string literals.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //VariableDeclarator[
+                    matches(VariableId/@Name, '(?i).*(password|passwd|secret|apikey|api_key|token|credential|auth).*')
+                    and VariableInitializer//StringLiteral
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Sensitive data in log statements -->
+    <rule name="SensitiveDataInLogs"
+          language="java"
+          message="Possible sensitive data being logged. Review for PII/credential exposure."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Detects logging calls that reference variables with names suggesting
+            sensitive data (password, ssn, token, etc.).
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodCall[
+                    pmd-java:matchesSig('org.slf4j.Logger#info(_)')
+                    or pmd-java:matchesSig('org.slf4j.Logger#debug(_)')
+                    or pmd-java:matchesSig('org.slf4j.Logger#warn(_)')
+                    or pmd-java:matchesSig('org.slf4j.Logger#error(_)')
+                    ]//VariableAccess[matches(@Name, '(?i).*(password|passwd|ssn|secret|token|credential|creditCard|cardNumber).*')]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Hardcoded encryption keys -->
+    <rule name="HardcodedEncryptionKey"
+          language="java"
+          message="Possible hardcoded encryption key. Store keys in a vault, KMS, or environment variable."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Encryption keys hardcoded in source code make the encryption useless -
+            anyone with access to the code (including the compiled JAR) can decrypt
+            the data. Use a key management service or environment variable.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //VariableDeclarator[
+                    matches(VariableId/@Name, '(?i).*(encrypt|decrypt|cipher|aes|rsa|hmac|signing|private).*[Kk]ey.*')
+                    and (VariableInitializer//StringLiteral or VariableInitializer//ArrayInitializer)
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SECURITY - INJECTION PATTERNS (OWASP Top 10)
+         Covers: SQL injection, command injection, unsafe deserialization,
+                 XXE, path traversal
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- SQL Injection via string concatenation in queries -->
+    <rule name="SqlInjectionRisk"
+          language="java"
+          message="SQL query built with string concatenation. Use parameterized queries (PreparedStatement, @Query with :param, or JPA Criteria API) instead."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Building SQL queries by concatenating strings allows attackers to inject
+            malicious SQL. This is the #1 OWASP vulnerability. Always use parameterized
+            queries: PreparedStatement with ?, @Query with :param, or JPA Criteria API.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodCall[
+                    @MethodName='createQuery' or @MethodName='createNativeQuery'
+                    or @MethodName='createSQLQuery' or @MethodName='executeQuery'
+                    or @MethodName='executeUpdate' or @MethodName='execute'
+                    or @MethodName='prepareStatement'
+                    ][
+                    ArgumentList//InfixExpression[@Operator='+']
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Command Injection via Runtime.exec() or ProcessBuilder -->
+    <rule name="CommandInjectionRisk"
+          language="java"
+          message="OS command built with dynamic input. Validate and sanitize all inputs, or use a safe API that does not invoke a shell."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Passing unsanitized input to Runtime.exec() or ProcessBuilder allows
+            attackers to execute arbitrary OS commands. Validate inputs against an
+            allowlist, or use APIs that don't invoke a shell.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodCall[@MethodName='exec'][
+                    ArgumentList//InfixExpression[@Operator='+']
+                    or ArgumentList//VariableAccess
+                    ]
+                    |
+                    //ConstructorCall[pmd-java:typeIs('java.lang.ProcessBuilder')][
+                    ArgumentList//InfixExpression[@Operator='+']
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Unsafe Deserialization - ObjectInputStream.readObject() -->
+    <rule name="UnsafeDeserialization"
+          language="java"
+          message="ObjectInputStream.readObject() is unsafe - deserialization of untrusted data can execute arbitrary code. Use an allowlist filter or a safe serialization format (JSON, Protobuf)."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Java deserialization via ObjectInputStream is inherently unsafe. Gadget
+            chain attacks can execute arbitrary code when deserializing untrusted data.
+            Use JSON/Protobuf instead, or apply ObjectInputFilter to restrict allowed classes.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodCall[@MethodName='readObject' or @MethodName='readUnshared'][
+                    ancestor::MethodDeclaration[
+                    .//ClassType[@SimpleName='ObjectInputStream']
+                    and not(.//MethodCall[@MethodName='setObjectInputFilter'])
+                    ]
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- XXE - XML parsing without disabling external entities -->
+    <rule name="XxeVulnerability"
+          language="java"
+          message="XML parser created without disabling external entities (XXE risk). Call setFeature() to disable DOCTYPE and external entities."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            XML parsers process external entity references by default, enabling XXE
+            attacks that can read local files, trigger SSRF, or cause DoS. Always
+            disable external entities via setFeature() before parsing.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodCall[@MethodName='newDocumentBuilder' or @MethodName='newSAXParser' or @MethodName='newTransformer'][
+                    not(ancestor::Block//MethodCall[@MethodName='setFeature'])
+                    and not(ancestor::Block//MethodCall[@MethodName='setAttribute'])
+                    ]
+                    |
+                    //MethodCall[@MethodName='newInstance'][
+                    ancestor::MethodDeclaration[
+                    .//ClassType[@SimpleName='DocumentBuilderFactory'
+                    or @SimpleName='SAXParserFactory'
+                    or @SimpleName='TransformerFactory'
+                    or @SimpleName='XMLInputFactory']
+                    and not(.//MethodCall[@MethodName='setFeature' or @MethodName='setProperty'])
+                    ]
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Path Traversal - File operations with unsanitized input -->
+    <rule name="PathTraversalRisk"
+          language="java"
+          message="File path constructed from variable input without normalization. Validate and normalize paths to prevent directory traversal (../../etc/passwd)."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Constructing file paths from user input without validation allows
+            attackers to read/write files outside the intended directory using
+            ../ sequences. Always normalize paths and validate against a base directory.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //ConstructorCall[
+                    pmd-java:typeIs('java.io.File')
+                    or pmd-java:typeIs('java.io.FileInputStream')
+                    or pmd-java:typeIs('java.io.FileOutputStream')
+                    or pmd-java:typeIs('java.io.FileReader')
+                    or pmd-java:typeIs('java.io.FileWriter')
+                    ][
+                    ArgumentList//InfixExpression[@Operator='+']
+                    ]
+                    |
+                    //MethodCall[@MethodName='get' or @MethodName='of'][
+                    ancestor::MethodDeclaration//ClassType[@SimpleName='Path' or @SimpleName='Paths']
+                    and ArgumentList//InfixExpression[@Operator='+']
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Weak random for security-sensitive operations -->
+    <rule name="InsecureRandomForSecurity"
+          language="java"
+          message="java.util.Random is not cryptographically secure. Use java.security.SecureRandom for tokens, keys, session IDs, or any security-sensitive value."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            java.util.Random uses a predictable algorithm. Attackers can predict
+            future values after observing a few outputs. For security-sensitive values
+            (tokens, keys, session IDs, nonces), always use SecureRandom.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //ConstructorCall[pmd-java:typeIs('java.util.Random')][
+                    ancestor::MethodDeclaration[
+                    matches(@Name, '(?i).*(token|session|key|nonce|salt|otp|password|secret|auth|csrf|random).*')
+                    ]
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         JPA / HIBERNATE PATTERNS
+         Covers: cascade delete, eager fetch, entity without equals/hashCode
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- CascadeType.ALL / REMOVE on JPA relations - accidental mass deletion -->
+    <rule name="DangerousCascadeDelete"
+          language="java"
+          message="CascadeType.ALL or REMOVE on @OneToMany/@ManyToMany can accidentally delete large amounts of data. Use explicit cascade types (PERSIST, MERGE) instead."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            CascadeType.ALL includes REMOVE, which means deleting a parent entity
+            will cascade-delete all children. On @OneToMany/@ManyToMany this can
+            wipe large portions of the database from a single delete call. Use
+            explicit cascade types (PERSIST, MERGE) and handle deletes explicitly.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //Annotation[
+                    @SimpleName='OneToMany' or @SimpleName='ManyToMany'
+                    ]//MemberValuePair[@Name='cascade']//FieldAccess[
+                    @Name='ALL' or @Name='REMOVE'
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- FetchType.EAGER on @OneToMany / @ManyToMany -->
+    <rule name="EagerFetchOnCollection"
+          language="java"
+          message="FetchType.EAGER on @OneToMany/@ManyToMany loads all related entities immediately. This causes N+1 queries and memory issues. Use LAZY fetch with JOIN FETCH when needed."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            EAGER fetching on collection associations (@OneToMany, @ManyToMany) loads
+            all related entities for every query, even when not needed. This causes
+            severe performance issues (N+1 queries, memory bloat). Use FetchType.LAZY
+            and explicit JOIN FETCH in queries when you need the related data.
+        </description>
+        <priority>2</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //Annotation[
+                    @SimpleName='OneToMany' or @SimpleName='ManyToMany'
+                    ]//MemberValuePair[@Name='fetch']//FieldAccess[@Name='EAGER']
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- @Entity without equals/hashCode override -->
+    <rule name="EntityWithoutEqualsHashCode"
+          language="java"
+          message="@Entity class does not override equals() and hashCode(). JPA entities need proper equals/hashCode for Set membership, detached entity comparison, and merge behavior."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            JPA entities stored in Sets or compared after detaching require proper
+            equals/hashCode implementations. Without them, entities use object identity
+            which breaks after serialization or when working with detached entities.
+            Implement equals/hashCode based on the business key or entity ID.
+        </description>
+        <priority>2</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //ClassDeclaration[
+                    Annotation[@SimpleName='Entity']
+                    and not(MethodDeclaration[@Name='equals'])
+                    and not(MethodDeclaration[@Name='hashCode'])
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         CONCURRENCY - ADVANCED
+         Covers: lock without finally, HashMap in threaded context,
+                 ExecutorService not shut down
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- Lock acquired without try-finally ensuring unlock -->
+    <rule name="LockNotReleasedInFinally"
+          language="java"
+          message="Lock.lock() called without unlock() in a finally block. If an exception occurs, the lock will never be released (deadlock)."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            When using explicit locks (ReentrantLock, ReadWriteLock), always call
+            unlock() in a finally block. Otherwise, an exception between lock() and
+            unlock() leaves the lock permanently held, causing deadlock.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodCall[@MethodName='lock' or @MethodName='lockInterruptibly'][
+                    not(
+                    ancestor::Block//TryStatement/FinallyClause//MethodCall[@MethodName='unlock']
+                    )
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- SimpleDateFormat usage (not thread-safe, use java.time) -->
+    <rule name="SimpleDateFormatUsage"
+          language="java"
+          message="SimpleDateFormat is not thread-safe and uses legacy date API. Use java.time.format.DateTimeFormatter (immutable, thread-safe) instead."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            SimpleDateFormat is not thread-safe - shared instances across threads
+            produce corrupted output. It also uses the legacy java.util.Date API.
+            Use DateTimeFormatter from java.time which is immutable and thread-safe.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //ConstructorCall[pmd-java:typeIs('java.text.SimpleDateFormat')]
+                    |
+                    //ClassType[@SimpleName='SimpleDateFormat']
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- ExecutorService created but never shut down -->
+    <rule name="ExecutorServiceNotShutdown"
+          language="java"
+          message="ExecutorService created but no shutdown() or shutdownNow() call found. Threads will leak and prevent JVM from exiting cleanly."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            An ExecutorService that is never shut down will keep its threads running
+            indefinitely, leaking resources and preventing the JVM from exiting.
+            Always call shutdown() or shutdownNow() in a finally block or shutdown hook.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodCall[
+                    @MethodName='newFixedThreadPool' or @MethodName='newCachedThreadPool'
+                    or @MethodName='newSingleThreadExecutor' or @MethodName='newScheduledThreadPool'
+                    or @MethodName='newWorkStealingPool'
+                    ][
+                    ancestor::MethodDeclaration[
+                    not(.//MethodCall[@MethodName='shutdown' or @MethodName='shutdownNow'])
+                    ]
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         SPRING BOOT - ADVANCED
+         Covers: @Async void, @Value on static, RestTemplate without timeout,
+                 @Transactional on wrong scope
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- @Async method returning void - exceptions are silently lost -->
+    <rule name="AsyncVoidMethod"
+          language="java"
+          message="@Async method returns void - exceptions will be silently lost. Return CompletableFuture&lt;Void&gt; to allow callers to handle failures."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            When a @Async method returns void, any exception thrown is silently
+            swallowed by Spring's async executor. The caller has no way to know
+            the task failed. Return CompletableFuture or Future instead so failures
+            can be detected and handled.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodDeclaration[
+                    Annotation[@SimpleName='Async']
+                    and VoidResult
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- @Value on static field - Spring can't inject into static fields -->
+    <rule name="ValueOnStaticField"
+          language="java"
+          message="@Value on a static field has no effect - Spring cannot inject into static fields. Use a non-static field or a @PostConstruct method."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Spring's @Value annotation does not work on static fields because
+            injection happens on bean instances, and static fields belong to the
+            class. The field will remain null/default. Use a non-static field,
+            or use a @PostConstruct method to set the static value.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //FieldDeclaration[
+                    Annotation[@SimpleName='Value']
+                    and pmd-java:modifiers()='static'
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- @Transactional on @Controller / @RestController -->
+    <rule name="TransactionalOnController"
+          language="java"
+          message="@Transactional on a controller holds a DB connection for the entire HTTP request (including view rendering). Move @Transactional to the @Service layer."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Placing @Transactional on a controller method means the database transaction
+            stays open during the entire request processing, including JSON serialization
+            and network I/O. This wastes connection pool resources and can cause
+            timeouts under load. Move transaction boundaries to the @Service layer.
+        </description>
+        <priority>2</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //ClassDeclaration[
+                    Annotation[@SimpleName='RestController' or @SimpleName='Controller']
+                    ]//MethodDeclaration[
+                    Annotation[@SimpleName='Transactional']
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- @Transactional on private method (ignored by Spring AOP) -->
+    <rule name="TransactionalOnPrivateMethod"
+          language="java"
+          message="@Transactional on a private method is ignored by Spring - AOP proxies only intercept public methods. Make the method public or move the annotation."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Spring's @Transactional uses AOP proxies which can only intercept calls
+            through the proxy (i.e., public methods called from outside the class).
+            @Transactional on a private method is silently ignored - no transaction
+            is created, which can lead to data inconsistency.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodDeclaration[
+                    Annotation[@SimpleName='Transactional']
+                    and pmd-java:modifiers()='private'
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- @Cacheable on private method (same issue as @Transactional) -->
+    <rule name="CacheableOnPrivateMethod"
+          language="java"
+          message="@Cacheable on a private method is ignored by Spring AOP. Make the method public for caching to work."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Like @Transactional, @Cacheable relies on Spring AOP proxies which
+            cannot intercept private methods. The annotation is silently ignored,
+            meaning no caching happens and every call hits the underlying data source.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodDeclaration[
+                    Annotation[@SimpleName='Cacheable']
+                    and pmd-java:modifiers()='private'
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         DATE/TIME API MISUSE
+         Covers: java.util.Date, timezone issues, parsing without try-catch
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- java.util.Date usage - use java.time instead -->
+    <rule name="LegacyDateUsage"
+          language="java"
+          message="java.util.Date is mutable and error-prone. Use java.time (LocalDate, LocalDateTime, Instant, ZonedDateTime) instead."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            java.util.Date is mutable, not thread-safe, and has confusing APIs
+            (months are 0-indexed, year is offset from 1900). The java.time package
+            (Java 8+) provides immutable, thread-safe alternatives: LocalDate,
+            LocalDateTime, Instant, ZonedDateTime.
+        </description>
+        <priority>3</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //ConstructorCall[pmd-java:typeIs('java.util.Date')][
+                    not(ancestor::MethodDeclaration[
+                    matches(@Name, '(?i).*(legacy|compat|convert|migration|deprecated).*')
+                    ])
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         RESOURCE MANAGEMENT - ADVANCED
+         Covers: JDBC connection leaks, file handle leaks
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- JDBC Connection not in try-with-resources -->
+    <rule name="JdbcConnectionLeak"
+          language="java"
+          message="Database connection obtained but not in try-with-resources. Connection may leak if an exception occurs, exhausting the connection pool."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Database connections are expensive and limited resources. Obtaining a
+            connection outside a try-with-resources block means it won't be closed
+            if an exception occurs, leading to connection pool exhaustion and
+            application failure under load.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodCall[@MethodName='getConnection'][
+                    not(ancestor::TryStatement/ResourceList)
+                    and not(ancestor::TryStatement//FinallyClause//MethodCall[@MethodName='close'])
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         PRODUCTION INCIDENT PATTERNS
+         Covers: floating point comparison, NaN, integer overflow
+         ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- Floating point == comparison -->
+    <rule name="FloatingPointEquality"
+          language="java"
+          message="Floating point values compared with == or !=. Due to rounding errors, use Math.abs(a - b) &lt; epsilon or BigDecimal for exact comparison."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Floating point arithmetic produces rounding errors (0.1 + 0.2 != 0.3).
+            Using == or != on float/double values almost never works as expected.
+            Use an epsilon comparison: Math.abs(a - b) less than EPSILON, or use
+            BigDecimal for exact decimal arithmetic.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //InfixExpression[(@Operator='==' or @Operator='!=')][
+                    .//NumericLiteral[@Base=10 and @ValueAsDouble]
+                    or .//CastExpression//PrimitiveType[@Name='float' or @Name='double']
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- NaN comparison (NaN == NaN is always false) -->
+    <rule name="NaNComparison"
+          language="java"
+          message="Comparing with NaN using == or != is always false/true. Use Double.isNaN() or Float.isNaN() instead."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            By IEEE 754 spec, NaN is not equal to anything, including itself.
+            (Double.NaN == Double.NaN) is always false. Use Double.isNaN(value)
+            or Float.isNaN(value) to check for NaN.
+        </description>
+        <priority>1</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //InfixExpression[(@Operator='==' or @Operator='!=')]
+                    [.//FieldAccess[@Name='NaN']]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Catching Exception and rethrowing as RuntimeException without cause -->
+    <rule name="ExceptionWithoutCause"
+          language="java"
+          message="Exception caught and rethrown without preserving the original cause. Pass the original exception as the cause: new RuntimeException(message, e)"
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            When catching an exception and throwing a new one, always pass the
+            original exception as the cause parameter. Without it, the original
+            stack trace and root cause are lost, making debugging in production
+            extremely difficult.
+        </description>
+        <priority>2</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //CatchClause[
+                    Block//ThrowStatement//ConstructorCall[
+                    pmd-java:typeIs('java.lang.RuntimeException')
+                    or pmd-java:typeIs('java.lang.IllegalStateException')
+                    or pmd-java:typeIs('java.lang.IllegalArgumentException')
+                    ][
+                    ArgumentList[count(*) = 1 and StringLiteral]
+                    ]
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+    <!-- Method with too many parameters (likely needs a parameter object) -->
+    <rule name="TooManyParameters"
+          language="java"
+          message="Method has too many parameters (5+). Consider using a parameter object or builder pattern for better readability and maintainability."
+          class="net.sourceforge.pmd.lang.rule.xpath.XPathRule">
+        <description>
+            Methods with many parameters are hard to read, easy to misuse (wrong
+            argument order), and difficult to maintain. Group related parameters
+            into a parameter object, use the builder pattern, or reconsider the
+            method's responsibilities.
+        </description>
+        <priority>3</priority>
+        <properties>
+            <property name="xpath">
+                <value>
+                    //MethodDeclaration[
+                    FormalParameters[count(FormalParameter) >= 5]
+                    and not(Annotation[@SimpleName='Override'])
+                    ]
+                </value>
+            </property>
+        </properties>
+    </rule>
+
+</ruleset>

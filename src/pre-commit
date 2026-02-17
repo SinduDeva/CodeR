@@ -1,0 +1,18 @@
+#!/bin/sh
+
+printf "\n"
+printf "  +---------------------------------------+\n"
+printf "  |       Pre-Commit Code Review           |\n"
+printf "  +---------------------------------------+\n"
+printf "\n"
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& './run-reviewer.bat'; exit \$LASTEXITCODE"
+status=$?
+
+if [ $status -ne 0 ]; then
+  printf "\n"
+  printf "  Commit blocked. Fix [!!] issues first.\n"
+  printf "\n"
+fi
+
+exit $status

@@ -1,0 +1,44 @@
+# ============================================
+# Code Reviewer Configuration
+# ============================================
+# Copy this file to your project root as:
+#   .code-reviewer.properties
+# ============================================
+
+# Block commit when MUST_FIX issues are found
+# Set to false during initial rollout (warning mode)
+block.on.must.fix=false
+
+# Only analyze lines that were changed
+# Set to false to review entire file
+only.changed.lines=true
+
+# If true, and only.changed.lines=true, expand the changed-line scope to the entire method
+# whenever any line within that method was changed.
+expand.changed.scope.to.method=false
+
+# Lightweight strict checks (fast, regex-based)
+# Enable only if you want more standards enforcement during commit.
+strict.java=true
+strict.spring=true
+
+# Show positive feedback for good patterns
+show.good.patterns=true
+
+# Show testing scope section (set to true to re-enable)
+show.testing.scope=true
+
+# Enable PMD integration (runs config/pmd/changelens-ruleset.xml on changed files)
+pmd.enabled=false
+
+# Custom PMD ruleset path (relative to repo root)
+pmd.ruleset=config/pmd/changelens-ruleset.xml
+
+# PMD command (pmd on Unix, pmd.bat on Windows)
+pmd.command=pmd
+
+# Automatically open HTML report in browser
+open.report=true
+
+# Enable debug output
+debug=false
