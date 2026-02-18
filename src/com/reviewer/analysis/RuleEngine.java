@@ -34,13 +34,13 @@ public class RuleEngine {
         }
     }
 
-    private static Set<Integer> buildLoggingScope(ChangedFile file, String[] lines, List<com.reviewer.model.Models.Range> methodRanges) {
+    private static Set<Integer> buildLoggingScope(ChangedFile file, String[] lines, List<Range> methodRanges) {
         Set<Integer> scope = new HashSet<>(file.changedLines);
         if (methodRanges == null || methodRanges.isEmpty() || file.changedLines.isEmpty()) {
             return scope;
         }
         for (int cl : file.changedLines) {
-            com.reviewer.model.Models.Range r = getMethodRangeForLine(methodRanges, cl);
+            Range r = getMethodRangeForLine(methodRanges, cl);
             if (r != null) {
                 for (int i = r.start; i <= r.end; i++) {
                     scope.add(i);
@@ -50,8 +50,8 @@ public class RuleEngine {
         return scope;
     }
 
-    private static List<com.reviewer.model.Models.Range> findMethodRanges(String[] lines) {
-        List<com.reviewer.model.Models.Range> ranges = new ArrayList<>();
+    private static List<Range> findMethodRanges(String[] lines) {
+        List<Range> ranges = new ArrayList<>();
         int i = 0;
         while (i < lines.length) {
             int braceLine = -1;
@@ -72,7 +72,7 @@ public class RuleEngine {
                 if (!normalized.matches("(?i)^\\s*(if|for|while|switch|catch|do|try|synchronized)\\b.*") && normalized.contains("(") && normalized.contains(")")) {
                     int end = findBlockEndLine(lines, braceLine, lines[braceLine].indexOf('{'));
                     if (end > 0) {
-                        ranges.add(new com.reviewer.model.Models.Range(i + 1, end));
+                        ranges.add(new Range(i + 1, end));
                         i = end;
                         continue;
                     }
@@ -83,8 +83,8 @@ public class RuleEngine {
         return ranges;
     }
 
-    private static com.reviewer.model.Models.Range getMethodRangeForLine(List<com.reviewer.model.Models.Range> ranges, int line) {
-        for (com.reviewer.model.Models.Range r : ranges) {
+    private static Range getMethodRangeForLine(List<Range> ranges, int line) {
+        for (Range r : ranges) {
             if (line >= r.start && line <= r.end) return r;
         }
         return null;
@@ -426,7 +426,7 @@ public class RuleEngine {
         }
     }
 
-    private static void reviewLogging(String content, String[] lines, ChangedFile file, List<Finding> findings, AnalysisContext context, List<com.reviewer.model.Models.Range> methodRanges) {
+    private static void reviewLogging(String content, String[] lines, ChangedFile file, List<Finding> findings, AnalysisContext context, List<Range> methodRanges) {
         Set<Integer> loggingScope = buildLoggingScope(file, lines, methodRanges);
 
         // Sensitive data in logs
@@ -483,14 +483,14 @@ public class RuleEngine {
         }
 
         // Duplicate variable logged within the same method
-        Map<com.reviewer.model.Models.Range, List<LogCall>> loggedVarsByMethod = new HashMap<>();
+        Map<Range, List<LogCall>> loggedVarsByMethod = new HashMap<>();
         for (LogCall call : logCalls) {
-            com.reviewer.model.Models.Range r = getMethodRangeForLine(methodRanges, call.line);
+            Range r = getMethodRangeForLine(methodRanges, call.line);
             if (r == null) continue;
             loggedVarsByMethod.computeIfAbsent(r, k -> new ArrayList<>()).add(call);
         }
 
-        for (Map.Entry<com.reviewer.model.Models.Range, List<LogCall>> entry : loggedVarsByMethod.entrySet()) {
+        for (Map.Entry<Range, List<LogCall>> entry : loggedVarsByMethod.entrySet()) {
             List<LogCall> callsInMethod = entry.getValue();
             Map<String, List<Integer>> varOccurrences = new HashMap<>();
             

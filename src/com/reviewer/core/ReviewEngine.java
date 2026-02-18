@@ -41,6 +41,12 @@ public class ReviewEngine {
         initializeBranch();
     }
 
+    private void debug(String message) {
+        if (config != null && config.debug) {
+            System.out.println("[DEBUG] " + message);
+        }
+    }
+
     private Path resolveRepoRoot() {
         List<String> root = runGit("git", "rev-parse", "--show-toplevel");
         if (!root.isEmpty()) {
@@ -236,6 +242,7 @@ public class ReviewEngine {
         ensureSymbolIndex();
         loadOrBuildReverseGraph(changedFiles);
         
+        debug("Tree-sitter available: " + com.reviewer.analysis.TreeSitterAnalyzer.isAvailable());
         impactEntries = analyzeImpact(changedFiles);
         enrichImpactEntriesWithTesting();
 
@@ -277,6 +284,7 @@ public class ReviewEngine {
             ImpactEntry entry = new ImpactEntry(f.name);
             JavaSymbolIndex.ClassInfo classInfo = resolveClassInfo(f);
             if (classInfo == null) {
+                debug("No class info for " + f.path + ", skipping impact detection");
                 continue;
             }
             entry.fullyQualifiedName = classInfo.fqn;
@@ -285,33 +293,56 @@ public class ReviewEngine {
                 if (path == null || !Files.exists(path)) continue;
                 String content = Files.readString(path);
                 String className = classInfo.simpleName;
+                debug("Analyzing impact for " + classInfo.fqn + " (" + f.path + ")");
                 
                 List<String> touchedMethods = null;
                 if (com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
                     touchedMethods = com.reviewer.analysis.TreeSitterAnalyzer.extractTouchedMethods(f, content);
+                    debug("Tree-sitter touched methods: " + touchedMethods);
                 }
-                
-                // Fallback to current ImpactAnalyzer if Tree-sitter failed or is disabled
-                if (touchedMethods == null) {
-                    touchedMethods = com.reviewer.analysis.ImpactAnalyzer.extractTouchedMethods(f, content);
+
+                if (touchedMethods == null || touchedMethods.isEmpty()) {
+                    touchedMethods = ImpactAnalyzer.extractTouchedMethods(f, content);
+                    debug("Fallback regex touched methods: " + touchedMethods);
                 }
-                touchedMethods = com.reviewer.analysis.ImpactAnalyzer.filterValidMethodNames(touchedMethods);
+                touchedMethods = ImpactAnalyzer.filterValidMethodNames(touchedMethods);
+                debug("Filtered touched methods: " + touchedMethods);
                 if (!touchedMethods.isEmpty()) {
                     entry.functions.addAll(touchedMethods);
                 }
 
+                if (!touchedMethods.isEmpty() && (content.contains("@RestController") || content.contains("@Controller"))) {
+                    if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
+
+                    List<String> endpoints = null;
+                    if (com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
+                        endpoints = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(content, className, touchedMethods);
+                        debug("Controller self endpoints (tree-sitter): " + endpoints);
+                    }
+                    if (endpoints == null || endpoints.isEmpty()) {
+                        endpoints = ImpactAnalyzer.extractControllerEndpoints(content, className, touchedMethods);
+                        debug("Controller self endpoints (regex): " + endpoints);
+                    }
+                    if (endpoints != null) {
+                        entry.endpoints.addAll(endpoints);
+                    }
+                }
+
                 Set<String> dependents = reverseDependencyGraph.getOrDefault(classInfo.fqn, Collections.emptySet());
+                debug("Dependents for " + classInfo.fqn + ": " + dependents);
                 for (String dependentFile : dependents) {
                     Path depPath = Path.of(dependentFile);
                     String depFileName = depPath.getFileName().toString();
                     if (isTestFile(new ChangedFile(dependentFile, depFileName, Collections.emptySet()))) {
+                        debug("Skipping dependent test file " + dependentFile);
                         continue;
                     }
                     String depContent = Files.readString(depPath);
                     String depClassName = depFileName.replace(".java", "");
 
                     // 1. Identify WHICH methods in the controller call the service
-                    List<String> callingMethods = com.reviewer.analysis.ImpactAnalyzer.getMethodsCalling(depContent, classInfo.simpleName, classInfo.fqn, touchedMethods);
+                    List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, classInfo.simpleName, classInfo.fqn, touchedMethods);
+                    debug("Calling methods in " + depFileName + " -> " + callingMethods);
 
 
                     if (!callingMethods.isEmpty()) {
@@ -326,11 +357,13 @@ public class ReviewEngine {
                             // TreeSitter needs the Controller's own methods to find mapping annotations
                             if (config.enableStructuralImpact && com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
                                 endpoints = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(depContent, depClassName, callingMethods);
+                                debug("Tree-sitter endpoints for " + depFileName + ": " + endpoints);
                             }
 
                             // Regex fallback needs the SERVICE'S touched methods to find the calls inside the Controller
                             if (endpoints == null || endpoints.isEmpty()) {
-                                endpoints = com.reviewer.analysis.ImpactAnalyzer.extractSpecificEndpoints(depContent, className, touchedMethods);
+                                endpoints = ImpactAnalyzer.extractSpecificEndpoints(depContent, className, touchedMethods);
+                                debug("Regex endpoints for " + depFileName + ": " + endpoints);
                             }
 
                             if (endpoints != null) {
@@ -341,10 +374,102 @@ public class ReviewEngine {
                         }
                     }
                 }
+
+                boolean isController = content.contains("@RestController") || content.contains("@Controller");
+                if (config.enableTransitiveApiDiscovery && !isController && entry.endpoints.isEmpty() && !touchedMethods.isEmpty()) {
+                    debug("No endpoints found for " + classInfo.fqn + "; attempting transitive controller discovery");
+                    List<String> transitiveEndpoints = discoverTransitiveControllerEndpoints(
+                            classInfo,
+                            config.transitiveApiDiscoveryMaxDepth,
+                            config.transitiveApiDiscoveryMaxVisitedFiles,
+                            config.transitiveApiDiscoveryMaxControllers
+                    );
+                    if (!transitiveEndpoints.isEmpty()) {
+                        if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
+                        for (String ep : transitiveEndpoints) {
+                            entry.endpoints.add("Potential: " + ep);
+                        }
+                    }
+                }
                 if (entry.hasSignal()) impact.add(entry);
             } catch (IOException ignored) {}
         }
         return impact;
+    }
+
+    private List<String> discoverTransitiveControllerEndpoints(JavaSymbolIndex.ClassInfo startClass, int maxDepth, int maxVisitedFiles, int maxControllers) {
+        if (startClass == null || reverseDependencyGraph == null || reverseDependencyGraph.isEmpty()) {
+            return Collections.emptyList();
+        }
+        maxDepth = Math.max(1, maxDepth);
+        maxVisitedFiles = Math.max(1, maxVisitedFiles);
+        maxControllers = Math.max(1, maxControllers);
+
+        Queue<TransitiveNode> queue = new ArrayDeque<>();
+        Set<String> visitedFqns = new HashSet<>();
+        Set<String> visitedPaths = new HashSet<>();
+        List<String> endpoints = new ArrayList<>();
+
+        queue.add(new TransitiveNode(startClass.fqn, 0));
+        visitedFqns.add(startClass.fqn);
+
+        int visitedFiles = 0;
+        int foundControllers = 0;
+
+        while (!queue.isEmpty() && visitedFiles < maxVisitedFiles && foundControllers < maxControllers) {
+            TransitiveNode node = queue.poll();
+            if (node.depth >= maxDepth) continue;
+
+            Set<String> dependents = reverseDependencyGraph.getOrDefault(node.fqn, Collections.emptySet());
+            for (String dependentFile : dependents) {
+                if (visitedFiles >= maxVisitedFiles || foundControllers >= maxControllers) break;
+                if (!visitedPaths.add(dependentFile)) continue;
+
+                Path depPath = Path.of(dependentFile);
+                String depFileName = depPath.getFileName().toString();
+                if (isTestFile(new ChangedFile(dependentFile, depFileName, Collections.emptySet()))) {
+                    continue;
+                }
+
+                JavaSymbolIndex.ClassInfo depInfo = symbolIndex == null ? null : symbolIndex.getClassInfo(depPath).orElse(null);
+                if (depInfo == null) {
+                    continue;
+                }
+                if (!visitedFqns.add(depInfo.fqn)) {
+                    continue;
+                }
+
+                visitedFiles++;
+
+                String depContent;
+                try {
+                    depContent = Files.readString(depPath);
+                } catch (IOException e) {
+                    continue;
+                }
+
+                boolean isController = depContent.contains("@RestController") || depContent.contains("@Controller");
+                if (isController) {
+                    foundControllers++;
+                    List<String> controllerEndpoints = ImpactAnalyzer.extractAllControllerEndpoints(depContent, depInfo.simpleName);
+                    if (controllerEndpoints != null) {
+                        endpoints.addAll(controllerEndpoints);
+                    }
+                }
+
+                queue.add(new TransitiveNode(depInfo.fqn, node.depth + 1));
+            }
+        }
+        return endpoints.stream().distinct().collect(Collectors.toList());
+    }
+
+    private static class TransitiveNode {
+        final String fqn;
+        final int depth;
+        TransitiveNode(String fqn, int depth) {
+            this.fqn = fqn;
+            this.depth = depth;
+        }
     }
 
     private Optional<String> findApiWrapper(String content, Collection<String> existingCallers) {

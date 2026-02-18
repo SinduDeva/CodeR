@@ -26,7 +26,7 @@ strict.spring=true
 show.good.patterns=true
 
 # Show testing scope section (set to true to re-enable)
-show.testing.scope=true
+show.testing.scope=false
 
 # Enable PMD integration (runs config/pmd/changelens-ruleset.xml on changed files)
 pmd.enabled=false
@@ -42,3 +42,8 @@ open.report=true
 
 # Enable debug output
 debug=false
+
+enable.transitive.api.discovery=true
+transitive.api.discovery.max.depth=4
+transitive.api.discovery.max.visited.files=200
+transitive.api.discovery.max.controllers=10

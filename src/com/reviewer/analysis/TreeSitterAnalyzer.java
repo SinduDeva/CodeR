@@ -126,14 +126,106 @@ public class TreeSitterAnalyzer {
     private static int findClosingBrace(String[] lines, int startIdx) {
         int depth = 0;
         boolean foundStart = false;
+        boolean inBlockComment = false;
+        boolean inStringLiteral = false;
+        boolean inCharLiteral = false;
+
         for (int i = startIdx; i < lines.length; i++) {
-            for (char c : lines[i].toCharArray()) {
-                if (c == '{') { depth++; foundStart = true; }
-                else if (c == '}') depth--;
-                if (foundStart && depth == 0) return i + 1;
+            String line = lines[i];
+            char[] chars = line.toCharArray();
+            boolean inLineComment = false;
+
+            for (int c = 0; c < chars.length; ) {
+                if (inLineComment) break;
+
+                if (inBlockComment) {
+                    int end = line.indexOf("*/", c);
+                    if (end == -1) {
+                        break;
+                    }
+                    inBlockComment = false;
+                    c = end + 2;
+                    continue;
+                }
+
+                if (inStringLiteral) {
+                    int end = findClosingQuote(chars, c, '"');
+                    if (end == -1) {
+                        c = chars.length;
+                        break;
+                    }
+                    inStringLiteral = false;
+                    c = end + 1;
+                    continue;
+                }
+
+                if (inCharLiteral) {
+                    int end = findClosingQuote(chars, c, '\'');
+                    if (end == -1) {
+                        c = chars.length;
+                        break;
+                    }
+                    inCharLiteral = false;
+                    c = end + 1;
+                    continue;
+                }
+
+                char ch = chars[c];
+                char next = (c + 1 < chars.length) ? chars[c + 1] : '\0';
+
+                if (ch == '/' && next == '/') {
+                    inLineComment = true;
+                    break;
+                }
+
+                if (ch == '/' && next == '*') {
+                    inBlockComment = true;
+                    c = c + 2;
+                    continue;
+                }
+
+                if (ch == '"' && !isEscaped(chars, c)) {
+                    inStringLiteral = true;
+                    c++;
+                    continue;
+                }
+
+                if (ch == '\'' && !isEscaped(chars, c)) {
+                    inCharLiteral = true;
+                    c++;
+                    continue;
+                }
+
+                if (ch == '{') {
+                    depth++;
+                    foundStart = true;
+                } else if (ch == '}') {
+                    depth--;
+                    if (foundStart && depth == 0) {
+                        return i + 1;
+                    }
+                }
+                c++;
             }
         }
         return -1;
+    }
+
+    private static int findClosingQuote(char[] chars, int startIndex, char quoteChar) {
+        for (int i = startIndex; i < chars.length; i++) {
+            if (chars[i] == quoteChar && !isEscaped(chars, i)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean isEscaped(char[] chars, int index) {
+        int backslashCount = 0;
+        for (int i = index - 1; i >= 0 && chars[i] == '\\'; i--) {
+            backslashCount++;
+        }
+        return (backslashCount & 1) == 1;
     }
 
     private static class MethodRange {
