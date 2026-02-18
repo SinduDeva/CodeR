@@ -65,12 +65,12 @@ public class ReviewEngine {
     public List<ChangedFile> getStagedFiles() {
         List<String> allStaged = runGit("git", "diff", "--cached", "--name-only");
         this.totalStagedFiles = allStaged.size();
-        System.out.println("[DEBUG] All staged files (" + totalStagedFiles + "): " + allStaged);
+        debug("[DEBUG] All staged files (" + totalStagedFiles + "): " + allStaged);
         
         List<String> javaFiles = allStaged.stream()
             .filter(f -> f.endsWith(".java"))
             .collect(Collectors.toList());
-        System.out.println("[DEBUG] Java files found: " + javaFiles);
+        debug("[DEBUG] Java files found: " + javaFiles);
             
         return javaFiles.stream()
             .map(f -> {
@@ -380,6 +380,7 @@ public class ReviewEngine {
                     debug("No endpoints found for " + classInfo.fqn + "; attempting transitive controller discovery");
                     List<String> transitiveEndpoints = discoverTransitiveControllerEndpoints(
                             classInfo,
+                            touchedMethods,
                             config.transitiveApiDiscoveryMaxDepth,
                             config.transitiveApiDiscoveryMaxVisitedFiles,
                             config.transitiveApiDiscoveryMaxControllers
@@ -387,7 +388,7 @@ public class ReviewEngine {
                     if (!transitiveEndpoints.isEmpty()) {
                         if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
                         for (String ep : transitiveEndpoints) {
-                            entry.endpoints.add("Potential: " + ep);
+                            entry.endpoints.add(ep);
                         }
                     }
                 }
@@ -397,8 +398,11 @@ public class ReviewEngine {
         return impact;
     }
 
-    private List<String> discoverTransitiveControllerEndpoints(JavaSymbolIndex.ClassInfo startClass, int maxDepth, int maxVisitedFiles, int maxControllers) {
+    private List<String> discoverTransitiveControllerEndpoints(JavaSymbolIndex.ClassInfo startClass, List<String> initialTouchedMethods, int maxDepth, int maxVisitedFiles, int maxControllers) {
         if (startClass == null || reverseDependencyGraph == null || reverseDependencyGraph.isEmpty()) {
+            return Collections.emptyList();
+        }
+        if (initialTouchedMethods == null || initialTouchedMethods.isEmpty()) {
             return Collections.emptyList();
         }
         maxDepth = Math.max(1, maxDepth);
@@ -410,7 +414,7 @@ public class ReviewEngine {
         Set<String> visitedPaths = new HashSet<>();
         List<String> endpoints = new ArrayList<>();
 
-        queue.add(new TransitiveNode(startClass.fqn, 0));
+        queue.add(new TransitiveNode(startClass.fqn, ImpactAnalyzer.filterValidMethodNames(initialTouchedMethods), 0));
         visitedFqns.add(startClass.fqn);
 
         int visitedFiles = 0;
@@ -420,10 +424,14 @@ public class ReviewEngine {
             TransitiveNode node = queue.poll();
             if (node.depth >= maxDepth) continue;
 
-            Set<String> dependents = reverseDependencyGraph.getOrDefault(node.fqn, Collections.emptySet());
+            if (node.impactedMethods == null || node.impactedMethods.isEmpty()) {
+                continue;
+            }
+
+            Set<String> dependents = getOrComputeDependents(node.fqn);
             for (String dependentFile : dependents) {
                 if (visitedFiles >= maxVisitedFiles || foundControllers >= maxControllers) break;
-                if (!visitedPaths.add(dependentFile)) continue;
+                if (visitedPaths.contains(dependentFile)) continue;
 
                 Path depPath = Path.of(dependentFile);
                 String depFileName = depPath.getFileName().toString();
@@ -435,12 +443,6 @@ public class ReviewEngine {
                 if (depInfo == null) {
                     continue;
                 }
-                if (!visitedFqns.add(depInfo.fqn)) {
-                    continue;
-                }
-
-                visitedFiles++;
-
                 String depContent;
                 try {
                     depContent = Files.readString(depPath);
@@ -448,26 +450,83 @@ public class ReviewEngine {
                     continue;
                 }
 
+                // Only traverse/record endpoints if we can prove a call chain to the impacted methods.
+                String currentSimpleName = simpleNameFromFqn(node.fqn);
+                List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, currentSimpleName, node.fqn, node.impactedMethods);
+                callingMethods = ImpactAnalyzer.filterValidMethodNames(callingMethods);
+                if (callingMethods.isEmpty()) {
+                    continue;
+                }
+
+                // Mark visited only when we have a proven call-chain.
+                if (!visitedPaths.add(dependentFile)) {
+                    continue;
+                }
+
+                visitedFiles++;
+                if (!visitedFqns.add(depInfo.fqn)) {
+                    continue;
+                }
+
                 boolean isController = depContent.contains("@RestController") || depContent.contains("@Controller");
                 if (isController) {
                     foundControllers++;
-                    List<String> controllerEndpoints = ImpactAnalyzer.extractAllControllerEndpoints(depContent, depInfo.simpleName);
-                    if (controllerEndpoints != null) {
-                        endpoints.addAll(controllerEndpoints);
+                    List<String> controllerEndpoints = null;
+                    if (config.enableStructuralImpact && com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
+                        controllerEndpoints = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(depContent, depInfo.simpleName, callingMethods);
                     }
+                    if (controllerEndpoints == null || controllerEndpoints.isEmpty()) {
+                        controllerEndpoints = ImpactAnalyzer.extractControllerEndpoints(depContent, depInfo.simpleName, callingMethods);
+                    }
+                    if (controllerEndpoints != null) endpoints.addAll(controllerEndpoints);
+                } else {
+                    queue.add(new TransitiveNode(depInfo.fqn, callingMethods, node.depth + 1));
                 }
-
-                queue.add(new TransitiveNode(depInfo.fqn, node.depth + 1));
             }
         }
         return endpoints.stream().distinct().collect(Collectors.toList());
     }
 
+    private Set<String> getOrComputeDependents(String fqn) {
+        if (fqn == null || fqn.isBlank() || symbolIndex == null) {
+            return Collections.emptySet();
+        }
+        Set<String> existing = reverseDependencyGraph.get(fqn);
+        if (existing != null) {
+            return existing;
+        }
+        JavaSymbolIndex.ClassInfo targetInfo = null;
+        for (JavaSymbolIndex.ClassInfo info : symbolIndex.getAllClasses()) {
+            if (fqn.equals(info.fqn)) {
+                targetInfo = info;
+                break;
+            }
+        }
+        if (targetInfo == null) {
+            return Collections.emptySet();
+        }
+        Map<String, Set<String>> computed = symbolIndex.buildReverseDependencyGraph(Collections.singletonList(targetInfo));
+        Set<String> deps = computed.getOrDefault(fqn, Collections.emptySet());
+        reverseDependencyGraph.put(fqn, new LinkedHashSet<>(deps));
+        return reverseDependencyGraph.get(fqn);
+    }
+
+    private static String simpleNameFromFqn(String fqn) {
+        if (fqn == null) return null;
+        String trimmed = fqn.trim();
+        if (trimmed.isEmpty()) return null;
+        int idx = trimmed.lastIndexOf('.');
+        String simple = idx >= 0 ? trimmed.substring(idx + 1) : trimmed;
+        return simple.isEmpty() ? null : simple;
+    }
+
     private static class TransitiveNode {
         final String fqn;
+        final List<String> impactedMethods;
         final int depth;
-        TransitiveNode(String fqn, int depth) {
+        TransitiveNode(String fqn, List<String> impactedMethods, int depth) {
             this.fqn = fqn;
+            this.impactedMethods = impactedMethods;
             this.depth = depth;
         }
     }

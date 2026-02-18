@@ -180,43 +180,123 @@ public class ImpactAnalyzer {
     }
 
     public static List<String> getMethodsCalling(String content, String targetSimpleName, String targetFqn, List<String> touchedMethods) {
-        if (touchedMethods.isEmpty()) return Collections.emptyList();
+        if (content == null || content.isBlank() || touchedMethods == null || touchedMethods.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        boolean hasAnyTouchedToken = false;
+        for (String method : touchedMethods) {
+            String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
+            if (!isValidMethodName(pureMethodName)) {
+                continue;
+            }
+            if (content.contains(pureMethodName + "(") ||
+                content.contains("." + pureMethodName + "(") ||
+                content.contains("::" + pureMethodName)) {
+                hasAnyTouchedToken = true;
+                break;
+            }
+        }
+        if (!hasAnyTouchedToken) {
+            return Collections.emptyList();
+        }
+
         Set<String> callers = new HashSet<>();
 
         // 1. Identify ALL possible instance names (variables, constructor params, fields)
         Set<String> instanceNames = extractInstanceNames(content, targetSimpleName, targetFqn);
 
-        if (instanceNames.isEmpty()) return Collections.emptyList();
+        // Also consider static calls like TargetClass.someMethod(...)
+        if (targetSimpleName != null && !targetSimpleName.isBlank()) {
+            instanceNames.add(targetSimpleName.trim());
+        }
 
         // 2. Identify all method boundaries in the current file accurately
         TreeMap<Integer, String> methodsInFile = new TreeMap<>();
-        // Robust regex for Java method declarations
         Pattern methodDeclPattern = Pattern.compile("(?:public|protected|private|static|final|\\s)+\\s*(?:<[^>]+>\\s+)?(?:[\\w\\<\\>\\[\\]\\.]+)\\s+(\\w+)\\s*\\([^\\)]*\\)\\s*(?:throws [\\w\\.,\\s<>]+)?\\s*\\{");
         Matcher mm = methodDeclPattern.matcher(content);
         while (mm.find()) {
             methodsInFile.put(mm.start(), mm.group(1));
         }
 
-        // 3. Scan for every call site of every touched method using every instance name
-        for (String instanceName : instanceNames) {
-            for (String method : touchedMethods) {
-                // Handle method name cleanup (remove params if present)
-                String pureMethodName = method.split("\\(")[0].trim();
-                if (!isValidMethodName(pureMethodName)) {
-                    continue;
-                }
-                String callPattern = "\\b" + Pattern.quote(instanceName) + "\\." + Pattern.quote(pureMethodName) + "\\b\\s*\\(";
-                Pattern cp = Pattern.compile(callPattern);
-                Matcher cm = cp.matcher(content);
-
-                while (cm.find()) {
-                    Map.Entry<Integer, String> callerEntry = methodsInFile.floorEntry(cm.start());
-                    if (callerEntry != null) {
-                        callers.add(callerEntry.getValue());
+        // 3. Check whether touched methods can be called unqualified due to static import
+        boolean staticImportAll = false;
+        Set<String> staticallyImportedMethods = new HashSet<>();
+        if (targetFqn != null && !targetFqn.isBlank()) {
+            Pattern staticImportPattern = Pattern.compile("(?m)^\\s*import\\s+static\\s+([\\w\\.\\*]+)\\s*;\\s*$");
+            Matcher sim = staticImportPattern.matcher(content);
+            while (sim.find()) {
+                String imp = sim.group(1);
+                if (imp == null) continue;
+                if (imp.equals(targetFqn + ".*")) {
+                    staticImportAll = true;
+                } else if (imp.startsWith(targetFqn + ".")) {
+                    String m = imp.substring((targetFqn + ".").length());
+                    if (isValidMethodName(m)) {
+                        staticallyImportedMethods.add(m);
                     }
                 }
             }
         }
+
+        // 4. Qualified calls: instanceName.method(...)
+        if (instanceNames != null && !instanceNames.isEmpty()) {
+            for (String instanceName : instanceNames) {
+                if (instanceName == null || instanceName.isBlank()) continue;
+                for (String method : touchedMethods) {
+                    String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
+                    if (!isValidMethodName(pureMethodName)) {
+                        continue;
+                    }
+                    String callPattern = "\\b" + Pattern.quote(instanceName) + "\\." + Pattern.quote(pureMethodName) + "\\b\\s*\\(";
+                    Pattern cp = Pattern.compile(callPattern);
+                    Matcher cm = cp.matcher(content);
+                    while (cm.find()) {
+                        int callPos = cm.start();
+                        Map.Entry<Integer, String> enclosing = methodsInFile.floorEntry(callPos);
+                        if (enclosing != null) {
+                            callers.add(enclosing.getValue());
+                        }
+                    }
+
+                    // Method reference: instanceName::method (streams/optionals)
+                    String refPattern = "\\b" + Pattern.quote(instanceName) + "\\s*::\\s*" + Pattern.quote(pureMethodName) + "\\b";
+                    Pattern rp = Pattern.compile(refPattern);
+                    Matcher rm = rp.matcher(content);
+                    while (rm.find()) {
+                        int callPos = rm.start();
+                        Map.Entry<Integer, String> enclosing = methodsInFile.floorEntry(callPos);
+                        if (enclosing != null) {
+                            callers.add(enclosing.getValue());
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. Unqualified calls: method(...) when statically imported from targetFqn
+        if (staticImportAll || !staticallyImportedMethods.isEmpty()) {
+            for (String method : touchedMethods) {
+                String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
+                if (!isValidMethodName(pureMethodName)) {
+                    continue;
+                }
+                if (!staticImportAll && !staticallyImportedMethods.contains(pureMethodName)) {
+                    continue;
+                }
+                String unqualifiedPattern = "(?<![\\w\\.])" + Pattern.quote(pureMethodName) + "\\b\\s*\\(";
+                Pattern up = Pattern.compile(unqualifiedPattern);
+                Matcher um = up.matcher(content);
+                while (um.find()) {
+                    int callPos = um.start();
+                    Map.Entry<Integer, String> enclosing = methodsInFile.floorEntry(callPos);
+                    if (enclosing != null) {
+                        callers.add(enclosing.getValue());
+                    }
+                }
+            }
+        }
+
         return new ArrayList<>(callers);
     }
 

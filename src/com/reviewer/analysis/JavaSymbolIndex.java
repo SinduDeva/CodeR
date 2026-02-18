@@ -138,9 +138,28 @@ public class JavaSymbolIndex {
         if (imports.hasExplicit(target.fqn)) return true;
         boolean simpleToken = containsToken(content, target.simpleName);
         if (imports.hasWildcard(target.packageName) && simpleToken) return true;
-        if (!target.packageName.isEmpty() && candidate.packageName.equals(target.packageName) && simpleToken) return true;
+        if (!target.packageName.isEmpty() && candidate.packageName.equals(target.packageName) && simpleToken && isSameModule(candidate.path, target.path)) return true;
         if (containsToken(content, target.fqn)) return true;
-        return simpleNameUnique && simpleToken;
+        return false;
+    }
+
+    private static boolean isSameModule(Path a, Path b) {
+        String ma = moduleRoot(a);
+        String mb = moduleRoot(b);
+        return ma != null && mb != null && ma.equals(mb);
+    }
+
+    private static String moduleRoot(Path path) {
+        if (path == null) return null;
+        String normalized = normalize(path).replace('\\', '/');
+        int idx = normalized.indexOf("/src/main/java/");
+        if (idx < 0) idx = normalized.indexOf("/src/test/java/");
+        if (idx < 0) idx = normalized.indexOf("/src/");
+        if (idx < 0) {
+            Path parent = path.toAbsolutePath().normalize().getParent();
+            return parent == null ? normalize(path) : parent.toString().replace('\\', '/');
+        }
+        return normalized.substring(0, idx);
     }
 
     private static boolean containsToken(String content, String token) {
