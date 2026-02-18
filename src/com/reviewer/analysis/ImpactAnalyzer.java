@@ -28,16 +28,26 @@ public class ImpactAnalyzer {
         while (m.find()) {
             String methodName = m.group(1);
             int startLine = getLineNumber(content, m.start());
-            int endLine = findMethodEndLine(lines, startLine);
-            System.out.println("[DEBUG] ImpactAnalyzer found method: " + methodName + " at lines " + startLine + "-" + endLine);
+            // Capture the line where the actual method name is found, not just the start of annotations
+            int methodNameIndex = m.start(1);
+            int methodNameLine = getLineNumber(content, methodNameIndex);
+            // Start brace matching from the method BODY opening brace (the regex ends with '{')
+            int bodyBracePos = m.end() - 1;
+            int bodyBraceLine = getLineNumber(content, bodyBracePos);
+            int bodyBraceCharIdx = getCharIndexInLine(content, bodyBracePos);
+            int endLine = findMethodEndLine(lines, bodyBraceLine, bodyBraceCharIdx);
+            System.out.println("[DEBUG] ImpactAnalyzer found method: " + methodName +
+                    " (sig start: " + startLine + ", name line: " + methodNameLine + ", body brace line: " + bodyBraceLine + ", end: " + endLine + ")");
             if (endLine == -1) endLine = startLine;
 
-            boolean intersects = file.changedLines.contains(startLine);
-            if (!intersects) {
-                for (int cl : file.changedLines) {
-                    if (cl >= startLine && cl <= endLine) { intersects = true; break; }
+            boolean intersects = false;
+            for (int cl : file.changedLines) {
+                if (cl >= startLine && cl <= endLine) {
+                    intersects = true;
+                    break;
                 }
             }
+
             if (intersects) {
                 if (isValidMethodName(methodName)) {
                     methods.add(methodName);
@@ -47,20 +57,118 @@ public class ImpactAnalyzer {
         return methods;
     }
 
-    private static int findMethodEndLine(String[] lines, int startLine) {
+    private static int findMethodEndLine(String[] lines, int startLine, int startCharIdx) {
         int depth = 0;
+        boolean inBlockComment = false;
+        boolean inStringLiteral = false;
+        boolean inCharLiteral = false;
+
+        boolean foundStart = false;
         for (int i = startLine - 1; i < lines.length; i++) {
-            String l = lines[i];
-            for (int c = 0; c < l.length(); c++) {
-                char ch = l.charAt(c);
-                if (ch == '{') depth++;
-                else if (ch == '}') {
-                    depth--;
-                    if (depth == 0) return i + 1;
+            String line = lines[i];
+            char[] chars = line.toCharArray();
+            boolean inLineComment = false;
+
+            int c = 0;
+            if (i == startLine - 1) {
+                c = Math.max(0, Math.min(startCharIdx, chars.length));
+            }
+
+            for (; c < chars.length; ) {
+                if (inLineComment) break;
+
+                if (inBlockComment) {
+                    int end = line.indexOf("*/", c);
+                    if (end == -1) {
+                        break;
+                    }
+                    inBlockComment = false;
+                    c = end + 2;
+                    continue;
                 }
+
+                if (inStringLiteral) {
+                    int end = findClosingQuote(chars, c, '"');
+                    if (end == -1) {
+                        c = chars.length;
+                        break;
+                    }
+                    inStringLiteral = false;
+                    c = end + 1;
+                    continue;
+                }
+
+                if (inCharLiteral) {
+                    int end = findClosingQuote(chars, c, '\'');
+                    if (end == -1) {
+                        c = chars.length;
+                        break;
+                    }
+                    inCharLiteral = false;
+                    c = end + 1;
+                    continue;
+                }
+
+                char ch = chars[c];
+                char next = (c + 1 < chars.length) ? chars[c + 1] : '\0';
+
+                if (ch == '/' && next == '/') {
+                    inLineComment = true;
+                    break;
+                }
+
+                if (ch == '/' && next == '*') {
+                    inBlockComment = true;
+                    c = c + 2;
+                    continue;
+                }
+
+                if (ch == '"' && !isEscaped(chars, c)) {
+                    inStringLiteral = true;
+                    c++;
+                    continue;
+                }
+
+                if (ch == '\'' && !isEscaped(chars, c)) {
+                    inCharLiteral = true;
+                    c++;
+                    continue;
+                }
+
+                if (ch == '{') {
+                    depth++;
+                    foundStart = true;
+                } else if (ch == '}') {
+                    depth--;
+                    if (foundStart && depth == 0) return i + 1;
+                }
+                c++;
             }
         }
         return -1;
+    }
+
+    private static int getCharIndexInLine(String content, int absoluteIndex) {
+        if (absoluteIndex <= 0) return 0;
+        int lastNewline = content.lastIndexOf('\n', Math.min(absoluteIndex, content.length() - 1));
+        return absoluteIndex - lastNewline - 1;
+    }
+
+    private static int findClosingQuote(char[] chars, int startIndex, char quoteChar) {
+        for (int i = startIndex; i < chars.length; i++) {
+            if (chars[i] == quoteChar && !isEscaped(chars, i)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean isEscaped(char[] chars, int index) {
+        int backslashCount = 0;
+        for (int i = index - 1; i >= 0 && chars[i] == '\\'; i--) {
+            backslashCount++;
+        }
+        return (backslashCount & 1) == 1;
     }
 
     private static int getLineNumber(String content, int index) {
@@ -153,6 +261,55 @@ public class ImpactAnalyzer {
             }
         }
         return endpoints;
+    }
+
+    public static List<String> extractControllerEndpoints(String content, String className, List<String> touchedMethods) {
+        if (touchedMethods == null || touchedMethods.isEmpty()) return Collections.emptyList();
+        List<String> endpoints = new ArrayList<>();
+        String[] lines = content.split("\\R");
+
+        String classPrefix = "";
+        Pattern classMapping = Pattern.compile("@(?:RequestMapping|PostMapping|GetMapping|PutMapping|DeleteMapping|PatchMapping)\\s*\\((?:value\\s*=\\s*)?\"([^\"]+)\"");
+        for (int i = 0; i < Math.min(lines.length, 50); i++) {
+            Matcher cm = classMapping.matcher(lines[i]);
+            if (cm.find()) {
+                classPrefix = cm.group(1);
+                break;
+            }
+            if (lines[i].contains("class " + className)) break;
+        }
+
+        Pattern methodMapping = Pattern.compile("@(?:RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\\b[^\\n]*");
+        Pattern pathPattern = Pattern.compile("(?:value|path)\\s*=\\s*\"([^\"]+)\"|\"([^\"]+)\"");
+
+        for (String rawMethod : touchedMethods) {
+            String methodName = rawMethod.split("\\(")[0].trim();
+            if (!isValidMethodName(methodName)) continue;
+
+            Pattern decl = Pattern.compile("\\b" + Pattern.quote(methodName) + "\\s*\\(");
+            Matcher dm = decl.matcher(content);
+            if (!dm.find()) continue;
+
+            int methodLine = getLineNumber(content, dm.start());
+            StringBuilder headerBuffer = new StringBuilder();
+            for (int i = Math.max(0, methodLine - 11); i < methodLine - 1 && i < lines.length; i++) {
+                headerBuffer.append(lines[i]).append(' ');
+            }
+
+            Matcher mm = methodMapping.matcher(headerBuffer.toString());
+            while (mm.find()) {
+                String annotation = mm.group();
+                Matcher pm = pathPattern.matcher(annotation);
+                String methodPath = "";
+                if (pm.find()) {
+                    methodPath = pm.group(1) != null ? pm.group(1) : pm.group(2);
+                }
+                String fullPath = (classPrefix + "/" + methodPath).replaceAll("//+", "/");
+                endpoints.add(className + "." + methodName + " [" + fullPath + "]");
+            }
+        }
+
+        return endpoints.stream().distinct().collect(Collectors.toList());
     }
 
     public static List<String> filterValidMethodNames(Collection<String> methods) {
