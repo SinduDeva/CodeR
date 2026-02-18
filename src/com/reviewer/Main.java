@@ -113,6 +113,11 @@ public class Main {
         config.showGoodPatterns = Boolean.parseBoolean(props.getProperty("show.good.patterns", String.valueOf(config.showGoodPatterns)));
         config.showTestingScope = Boolean.parseBoolean(props.getProperty("show.testing.scope", String.valueOf(config.showTestingScope)));
         config.openReport = Boolean.parseBoolean(props.getProperty("open.report", String.valueOf(config.openReport)));
+        config.debug = Boolean.parseBoolean(props.getProperty("debug", String.valueOf(config.debug)));
+        config.enableTransitiveApiDiscovery = Boolean.parseBoolean(props.getProperty("enable.transitive.api.discovery", String.valueOf(config.enableTransitiveApiDiscovery)));
+        config.transitiveApiDiscoveryMaxDepth = Integer.parseInt(props.getProperty("transitive.api.discovery.max.depth", String.valueOf(config.transitiveApiDiscoveryMaxDepth)));
+        config.transitiveApiDiscoveryMaxVisitedFiles = Integer.parseInt(props.getProperty("transitive.api.discovery.max.visited.files", String.valueOf(config.transitiveApiDiscoveryMaxVisitedFiles)));
+        config.transitiveApiDiscoveryMaxControllers = Integer.parseInt(props.getProperty("transitive.api.discovery.max.controllers", String.valueOf(config.transitiveApiDiscoveryMaxControllers)));
         config.enablePmdAnalysis = Boolean.parseBoolean(props.getProperty("enable.pmd.analysis", String.valueOf(config.enablePmdAnalysis)));
         config.enableStructuralImpact = Boolean.parseBoolean(props.getProperty("enable.structural.impact", String.valueOf(config.enableStructuralImpact)));
         config.pmdPath = props.getProperty("pmd.path", config.pmdPath);

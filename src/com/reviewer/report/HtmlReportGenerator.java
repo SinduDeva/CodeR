@@ -645,7 +645,12 @@ public class HtmlReportGenerator {
         //appendImpactSummary(html, impact, displayFunctions, displayNotes);
         appendFloatingSummaryBox(html, impact, displayFunctions, displayNotes);
 
-        appendCollapsibleList(html, "Impacted APIs", "Endpoints touched", impact.endpoints, "api");
+        String apiSubtitle = "Endpoints touched";
+        boolean hasPotential = impact.endpoints.stream().anyMatch(e -> e != null && e.startsWith("Potential:"));
+        if (hasPotential) {
+            apiSubtitle = "Endpoints touched (includes Potential)";
+        }
+        appendCollapsibleList(html, "Impacted APIs", apiSubtitle, impact.endpoints, "api");
         appendCollapsibleList(html, "Modified Methods", methodSummarySubtitle(displayNotes, displayFunctions.size()), displayFunctions, "methods");
         appendCollapsibleList(html, "Impact Notes", "Contextual insights", displayNotes, "notes");
         appendCollapsibleList(html, "Related Tests", impact.recommendedTests.isEmpty() ? "No mapped tests" : "Tests to run", impact.recommendedTests, "tests");

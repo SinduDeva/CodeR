@@ -374,10 +374,102 @@ public class ReviewEngine {
                         }
                     }
                 }
+
+                boolean isController = content.contains("@RestController") || content.contains("@Controller");
+                if (config.enableTransitiveApiDiscovery && !isController && entry.endpoints.isEmpty() && !touchedMethods.isEmpty()) {
+                    debug("No endpoints found for " + classInfo.fqn + "; attempting transitive controller discovery");
+                    List<String> transitiveEndpoints = discoverTransitiveControllerEndpoints(
+                            classInfo,
+                            config.transitiveApiDiscoveryMaxDepth,
+                            config.transitiveApiDiscoveryMaxVisitedFiles,
+                            config.transitiveApiDiscoveryMaxControllers
+                    );
+                    if (!transitiveEndpoints.isEmpty()) {
+                        if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
+                        for (String ep : transitiveEndpoints) {
+                            entry.endpoints.add("Potential: " + ep);
+                        }
+                    }
+                }
                 if (entry.hasSignal()) impact.add(entry);
             } catch (IOException ignored) {}
         }
         return impact;
+    }
+
+    private List<String> discoverTransitiveControllerEndpoints(JavaSymbolIndex.ClassInfo startClass, int maxDepth, int maxVisitedFiles, int maxControllers) {
+        if (startClass == null || reverseDependencyGraph == null || reverseDependencyGraph.isEmpty()) {
+            return Collections.emptyList();
+        }
+        maxDepth = Math.max(1, maxDepth);
+        maxVisitedFiles = Math.max(1, maxVisitedFiles);
+        maxControllers = Math.max(1, maxControllers);
+
+        Queue<TransitiveNode> queue = new ArrayDeque<>();
+        Set<String> visitedFqns = new HashSet<>();
+        Set<String> visitedPaths = new HashSet<>();
+        List<String> endpoints = new ArrayList<>();
+
+        queue.add(new TransitiveNode(startClass.fqn, 0));
+        visitedFqns.add(startClass.fqn);
+
+        int visitedFiles = 0;
+        int foundControllers = 0;
+
+        while (!queue.isEmpty() && visitedFiles < maxVisitedFiles && foundControllers < maxControllers) {
+            TransitiveNode node = queue.poll();
+            if (node.depth >= maxDepth) continue;
+
+            Set<String> dependents = reverseDependencyGraph.getOrDefault(node.fqn, Collections.emptySet());
+            for (String dependentFile : dependents) {
+                if (visitedFiles >= maxVisitedFiles || foundControllers >= maxControllers) break;
+                if (!visitedPaths.add(dependentFile)) continue;
+
+                Path depPath = Path.of(dependentFile);
+                String depFileName = depPath.getFileName().toString();
+                if (isTestFile(new ChangedFile(dependentFile, depFileName, Collections.emptySet()))) {
+                    continue;
+                }
+
+                JavaSymbolIndex.ClassInfo depInfo = symbolIndex == null ? null : symbolIndex.getClassInfo(depPath).orElse(null);
+                if (depInfo == null) {
+                    continue;
+                }
+                if (!visitedFqns.add(depInfo.fqn)) {
+                    continue;
+                }
+
+                visitedFiles++;
+
+                String depContent;
+                try {
+                    depContent = Files.readString(depPath);
+                } catch (IOException e) {
+                    continue;
+                }
+
+                boolean isController = depContent.contains("@RestController") || depContent.contains("@Controller");
+                if (isController) {
+                    foundControllers++;
+                    List<String> controllerEndpoints = ImpactAnalyzer.extractAllControllerEndpoints(depContent, depInfo.simpleName);
+                    if (controllerEndpoints != null) {
+                        endpoints.addAll(controllerEndpoints);
+                    }
+                }
+
+                queue.add(new TransitiveNode(depInfo.fqn, node.depth + 1));
+            }
+        }
+        return endpoints.stream().distinct().collect(Collectors.toList());
+    }
+
+    private static class TransitiveNode {
+        final String fqn;
+        final int depth;
+        TransitiveNode(String fqn, int depth) {
+            this.fqn = fqn;
+            this.depth = depth;
+        }
     }
 
     private Optional<String> findApiWrapper(String content, Collection<String> existingCallers) {

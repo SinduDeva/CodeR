@@ -312,6 +312,72 @@ public class ImpactAnalyzer {
         return endpoints.stream().distinct().collect(Collectors.toList());
     }
 
+    public static List<String> extractAllControllerEndpoints(String content, String className) {
+        if (content == null || content.isBlank()) return Collections.emptyList();
+        List<String> endpoints = new ArrayList<>();
+        String[] lines = content.split("\\R");
+
+        String classPrefix = "";
+        Pattern classMapping = Pattern.compile("@RequestMapping\\s*\\((?:value\\s*=\\s*)?\"([^\"]+)\"");
+        for (int i = 0; i < Math.min(lines.length, 80); i++) {
+            Matcher cm = classMapping.matcher(lines[i]);
+            if (cm.find()) {
+                classPrefix = cm.group(1);
+                break;
+            }
+            if (className != null && lines[i].contains("class " + className)) break;
+        }
+
+        Pattern mappingStart = Pattern.compile("@(?:RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\\b");
+        Pattern methodSignature = Pattern.compile("(?:public|protected|private)\\s+[^{;]+?\\b(\\w+)\\s*\\([^)]*\\)\\s*(?:throws [^{]+)?\\s*\\{");
+        Pattern pathPattern = Pattern.compile("(?:value|path)\\s*=\\s*\"([^\"]+)\"|\"([^\"]+)\"");
+
+        for (int i = 0; i < lines.length; i++) {
+            if (!mappingStart.matcher(lines[i]).find()) continue;
+
+            StringBuilder annoBuf = new StringBuilder(lines[i]).append(' ');
+            int j = i + 1;
+            while (j < lines.length && !lines[j].contains(")") && !lines[j].contains("class ") && !lines[j].contains("{") && (j - i) < 10) {
+                annoBuf.append(lines[j]).append(' ');
+                j++;
+            }
+            if (j < lines.length) {
+                annoBuf.append(lines[j]).append(' ');
+            }
+
+            String methodPath = "";
+            Matcher pm = pathPattern.matcher(annoBuf.toString());
+            if (pm.find()) {
+                methodPath = pm.group(1) != null ? pm.group(1) : pm.group(2);
+            }
+
+            int k = j;
+            while (k < lines.length && lines[k].trim().startsWith("@")) {
+                k++;
+            }
+            if (k >= lines.length) continue;
+
+            StringBuilder sigBuf = new StringBuilder(lines[k]).append('\n');
+            int s = k + 1;
+            while (s < lines.length && !lines[s].contains("{") && (s - k) < 6) {
+                sigBuf.append(lines[s]).append('\n');
+                s++;
+            }
+            if (s < lines.length) sigBuf.append(lines[s]);
+
+            Matcher sm = methodSignature.matcher(sigBuf.toString().replaceAll("\\s+", " "));
+            if (!sm.find()) continue;
+            String methodName = sm.group(1);
+            if (!isValidMethodName(methodName)) continue;
+
+            String fullPath = (classPrefix + "/" + methodPath).replaceAll("//+", "/");
+            String effectiveClassName = (className == null || className.isBlank()) ? "Controller" : className;
+            endpoints.add(effectiveClassName + "." + methodName + " [" + fullPath + "]");
+        }
+
+        return endpoints.stream().distinct().collect(Collectors.toList());
+    }
+
     public static List<String> filterValidMethodNames(Collection<String> methods) {
         if (methods == null || methods.isEmpty()) {
             return Collections.emptyList();

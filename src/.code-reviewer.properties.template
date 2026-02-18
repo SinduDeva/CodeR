@@ -42,3 +42,8 @@ open.report=true
 
 # Enable debug output
 debug=false
+
+enable.transitive.api.discovery=true
+transitive.api.discovery.max.depth=4
+transitive.api.discovery.max.visited.files=200
+transitive.api.discovery.max.controllers=10
