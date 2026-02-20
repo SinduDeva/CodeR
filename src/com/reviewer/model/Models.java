@@ -149,7 +149,7 @@ public class Models {
         public boolean showTestingScope = false;
         public boolean openReport = false;
         public boolean debug = false;
-        public boolean enableTransitiveApiDiscovery = false;
+        public boolean enableTransitiveApiDiscovery = true;
         public int transitiveApiDiscoveryMaxDepth = 3;
         public int transitiveApiDiscoveryMaxVisitedFiles = 200;
         public int transitiveApiDiscoveryMaxControllers = 10;
@@ -158,7 +158,7 @@ public class Models {
         public boolean useWindsurf = true;
         public String windsurfEndpoint = "http://localhost:49321/impact";
         public boolean enablePmdAnalysis = false;
-        public boolean enableStructuralImpact = false;
+        public boolean enableStructuralImpact = true;
         public String pmdPath = "pmd";
         public String pmdRulesetPath = "config/pmd/changelens-ruleset.xml";
     }

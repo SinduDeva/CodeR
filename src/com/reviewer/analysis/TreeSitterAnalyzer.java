@@ -65,35 +65,78 @@ public class TreeSitterAnalyzer {
 
         // 1. Detect Class-Level Mapping
         String classPrefix = "";
-        Pattern classMapping = Pattern.compile("@(?:RequestMapping|PostMapping|GetMapping)\\s*\\((?:value\\s*=\\s*)?\"([^\"]+)\"\\)");
-        for (int i = 0; i < Math.min(lines.length, 50); i++) {
-            Matcher cm = classMapping.matcher(lines[i]);
-            if (cm.find()) { classPrefix = cm.group(1); break; }
+        Pattern mappingStart = Pattern.compile("@(?:RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\\b");
+        Pattern pathPattern = Pattern.compile("(?:value|path)\\s*=\\s*\"([^\"]+)\"|\"([^\"]+)\"");
+        Pattern classMappingStart = Pattern.compile("@(?:RequestMapping|PostMapping|GetMapping|PutMapping|DeleteMapping|PatchMapping)\\s*\\((?:(?:value|path)\\s*=\\s*)?\"([^\"]+)\"");
+        for (int i = 0; i < Math.min(lines.length, 80); i++) {
+            Matcher cm = classMappingStart.matcher(lines[i]);
+            if (cm.find()) {
+                classPrefix = cm.group(1);
+                break;
+            }
+            if (mappingStart.matcher(lines[i]).find()) {
+                StringBuilder annoBuf = new StringBuilder(lines[i]).append(' ');
+                int j = i + 1;
+                while (j < Math.min(lines.length, 80) && !lines[j].contains(")") && !lines[j].contains("class ") && !lines[j].contains("{") && (j - i) < 30) {
+                    annoBuf.append(lines[j]).append(' ');
+                    j++;
+                }
+                if (j < Math.min(lines.length, 80)) {
+                    annoBuf.append(lines[j]).append(' ');
+                }
+                Matcher pm = pathPattern.matcher(annoBuf.toString());
+                if (pm.find()) {
+                    classPrefix = pm.group(1) != null ? pm.group(1) : pm.group(2);
+                    break;
+                }
+            }
             if (lines[i].contains("class " + className)) break;
         }
 
         List<MethodRange> methods = findMethodRanges(lines);
-        Pattern methodMapping = Pattern.compile("@(?:[\\w]*)Mapping\\s*\\((?:[^\\)]*)\\)");
-        Pattern pathPattern = Pattern.compile("(?:value|path)\\s*=\\s*\"([^\"]+)\"|\"([^\"]+)\"");
+        Pattern methodMapping = Pattern.compile("@(?:RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\\b");
 
         for (MethodRange method : methods) {
-            if (touchedMethods.contains(method.methodName)) {
-                StringBuilder headerBuffer = new StringBuilder();
-                for (int i = Math.max(0, method.startLine - 10); i < method.startLine; i++) {
-                    headerBuffer.append(lines[i]).append(" ");
+            if (!touchedMethods.contains(method.methodName)) {
+                continue;
+            }
+
+            int methodLineIdx = Math.max(0, Math.min(lines.length - 1, method.headerLine - 1));
+            int annoStart = methodLineIdx - 1;
+            while (annoStart >= 0) {
+                String l = lines[annoStart].trim();
+                if (l.isEmpty()) {
+                    annoStart--;
+                    continue;
+                }
+                if (l.startsWith("@")) {
+                    annoStart--;
+                    continue;
+                }
+                break;
+            }
+            annoStart = Math.min(methodLineIdx - 1, annoStart + 1);
+
+            for (int i = Math.max(0, annoStart); i < methodLineIdx; i++) {
+                if (!methodMapping.matcher(lines[i]).find()) continue;
+
+                StringBuilder annoBuf = new StringBuilder(lines[i]).append(' ');
+                int j = i + 1;
+                while (j < methodLineIdx && !lines[j].contains(")") && (j - i) < 30) {
+                    annoBuf.append(lines[j]).append(' ');
+                    j++;
+                }
+                if (j < methodLineIdx) {
+                    annoBuf.append(lines[j]).append(' ');
                 }
 
-                Matcher mm = methodMapping.matcher(headerBuffer.toString());
-                while (mm.find()) {
-                    String annotation = mm.group();
-                    Matcher pm = pathPattern.matcher(annotation);
-                    String methodPath = "";
-                    if (pm.find()) {
-                        methodPath = pm.group(1) != null ? pm.group(1) : pm.group(2);
-                    }
-                    String fullPath = (classPrefix + "/" + methodPath).replaceAll("//+", "/");
-                    endpoints.add(className + "." + method.methodName + " [" + fullPath + "]");
+                String methodPath = "";
+                Matcher pm = pathPattern.matcher(annoBuf.toString());
+                if (pm.find()) {
+                    methodPath = pm.group(1) != null ? pm.group(1) : pm.group(2);
                 }
+                String fullPath = (classPrefix + "/" + methodPath).replaceAll("//+", "/");
+                endpoints.add(className + "." + method.methodName + " [" + fullPath + "]");
             }
         }
         return endpoints.stream().distinct().collect(Collectors.toList());
@@ -111,13 +154,12 @@ public class TreeSitterAnalyzer {
 
         while (m.find()) {
             String methodName = m.group(1);
-            // Ensure we don't treat 'main' or constructors as false positives if they aren't relevant
-            // Start searching from where the opening brace '{' is found to get the true method start
+            int nameLine = (int) content.substring(0, m.start(1)).chars().filter(c -> c == '\n').count() + 1;
             int braceIndex = m.group().indexOf('{');
-            int startLine = (int) content.substring(0, m.start() + braceIndex).chars().filter(c -> c == '\n').count() + 1;
-            int endLine = findClosingBrace(lines, startLine - 1);
-            if (endLine != -1 && endLine >= startLine) {
-                ranges.add(new MethodRange(methodName, startLine, endLine));
+            int braceLine = (int) content.substring(0, m.start() + braceIndex).chars().filter(c -> c == '\n').count() + 1;
+            int endLine = findClosingBrace(lines, braceLine - 1);
+            if (endLine != -1 && endLine >= braceLine) {
+                ranges.add(new MethodRange(methodName, nameLine, endLine, nameLine));
             }
         }
         return ranges;
@@ -229,7 +271,7 @@ public class TreeSitterAnalyzer {
     }
 
     private static class MethodRange {
-        String methodName; int startLine; int endLine;
-        MethodRange(String n, int s, int e) { this.methodName = n; this.startLine = s; this.endLine = e; }
+        String methodName; int startLine; int endLine; int headerLine;
+        MethodRange(String n, int s, int e, int h) { this.methodName = n; this.startLine = s; this.endLine = e; this.headerLine = h; }
     }
 }

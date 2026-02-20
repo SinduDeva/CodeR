@@ -360,9 +360,9 @@ public class ReviewEngine {
                                 debug("Tree-sitter endpoints for " + depFileName + ": " + endpoints);
                             }
 
-                            // Regex fallback needs the SERVICE'S touched methods to find the calls inside the Controller
+                            // Regex fallback needs the CONTROLLER methods to find the impacted endpoints
                             if (endpoints == null || endpoints.isEmpty()) {
-                                endpoints = ImpactAnalyzer.extractSpecificEndpoints(depContent, className, touchedMethods);
+                                endpoints = ImpactAnalyzer.extractControllerEndpoints(depContent, depClassName, callingMethods);
                                 debug("Regex endpoints for " + depFileName + ": " + endpoints);
                             }
 
@@ -376,8 +376,9 @@ public class ReviewEngine {
                 }
 
                 boolean isController = content.contains("@RestController") || content.contains("@Controller");
-                if (config.enableTransitiveApiDiscovery && !isController && entry.endpoints.isEmpty() && !touchedMethods.isEmpty()) {
-                    debug("No endpoints found for " + classInfo.fqn + "; attempting transitive controller discovery");
+                if (config.enableTransitiveApiDiscovery && !isController && !touchedMethods.isEmpty()) {
+                    debug("Attempting transitive controller discovery for " + classInfo.fqn);
+                    Set<String> existingEndpoints = new HashSet<>(entry.endpoints);
                     List<String> transitiveEndpoints = discoverTransitiveControllerEndpoints(
                             classInfo,
                             touchedMethods,
@@ -388,7 +389,9 @@ public class ReviewEngine {
                     if (!transitiveEndpoints.isEmpty()) {
                         if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
                         for (String ep : transitiveEndpoints) {
-                            entry.endpoints.add(ep);
+                            if (!existingEndpoints.contains(ep)) {
+                                entry.endpoints.add(ep);
+                            }
                         }
                     }
                 }
@@ -429,9 +432,13 @@ public class ReviewEngine {
             }
 
             Set<String> dependents = getOrComputeDependents(node.fqn);
+            debug("Transitive: processing node " + node.fqn + " at depth " + node.depth + " with methods " + node.impactedMethods + ", found " + dependents.size() + " dependents");
             for (String dependentFile : dependents) {
                 if (visitedFiles >= maxVisitedFiles || foundControllers >= maxControllers) break;
-                if (visitedPaths.contains(dependentFile)) continue;
+                if (visitedPaths.contains(dependentFile)) {
+                    debug("Transitive: skipping already-visited " + dependentFile);
+                    continue;
+                }
 
                 Path depPath = Path.of(dependentFile);
                 String depFileName = depPath.getFileName().toString();
@@ -452,23 +459,26 @@ public class ReviewEngine {
 
                 // Only traverse/record endpoints if we can prove a call chain to the impacted methods.
                 String currentSimpleName = simpleNameFromFqn(node.fqn);
-                List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, currentSimpleName, node.fqn, node.impactedMethods);
+                debug("Transitive: checking " + depFileName + " for calls to " + currentSimpleName + "." + node.impactedMethods);
+                List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, currentSimpleName, node.fqn, node.impactedMethods, false);
                 callingMethods = ImpactAnalyzer.filterValidMethodNames(callingMethods);
+                debug("Transitive: found calling methods in " + depFileName + ": " + callingMethods);
                 if (callingMethods.isEmpty()) {
                     continue;
                 }
 
+                boolean isController = depContent.contains("@RestController") || depContent.contains("@Controller");
+                
                 // Mark visited only when we have a proven call-chain.
-                if (!visitedPaths.add(dependentFile)) {
+                // For controllers, we use a different key (fqn + methods) so we can revisit with different calling methods
+                String visitKey = isController ? (depInfo.fqn + ":" + callingMethods.toString()) : dependentFile;
+                if (!visitedPaths.add(visitKey)) {
+                    debug("Transitive: skipping already-processed " + depFileName + " with methods " + callingMethods);
                     continue;
                 }
 
                 visitedFiles++;
-                if (!visitedFqns.add(depInfo.fqn)) {
-                    continue;
-                }
 
-                boolean isController = depContent.contains("@RestController") || depContent.contains("@Controller");
                 if (isController) {
                     foundControllers++;
                     List<String> controllerEndpoints = null;
@@ -480,6 +490,9 @@ public class ReviewEngine {
                     }
                     if (controllerEndpoints != null) endpoints.addAll(controllerEndpoints);
                 } else {
+                    if (!visitedFqns.add(depInfo.fqn)) {
+                        continue;
+                    }
                     queue.add(new TransitiveNode(depInfo.fqn, callingMethods, node.depth + 1));
                 }
             }
