@@ -64,9 +64,6 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo   Copying supporting files...
-echo Copying "%REPO_DIR%run-reviewer.bat" to "%INSTALL_DIR%\review.bat"
-copy /y "%REPO_DIR%run-reviewer.bat" "%INSTALL_DIR%\review.bat"
-dir "%INSTALL_DIR%\review.bat"
 copy /y "%REPO_DIR%run-reviewer.bat" "%INSTALL_DIR%\review.bat" >nul
 copy /y "%SRC_DIR%\pre-commit" "%INSTALL_DIR%\pre-commit" >nul
 if exist "%REPO_DIR%.code-reviewer.properties" (

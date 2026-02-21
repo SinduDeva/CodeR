@@ -15,9 +15,10 @@ public class RuleEngine {
         reviewNullSafety(content, lines, file, findings, context);
         reviewExceptionHandling(content, lines, file, findings, context);
         reviewLogging(content, lines, file, findings, context, methodRanges);
-        reviewSpringBoot(content, lines, file, findings, context);
+        reviewSpringBoot(content, lines, file, findings, context, config);
         reviewPerformance(content, lines, file, findings, context);
         reviewCodeQuality(content, lines, file, findings, context, config);
+        reviewJavaModern(content, lines, file, findings, config);
         detectGoodPatterns(content, lines, file);
     }
 
@@ -545,7 +546,7 @@ public class RuleEngine {
         }
     }
 
-    private static void reviewSpringBoot(String content, String[] lines, ChangedFile file, List<Finding> findings, AnalysisContext context) {
+    private static void reviewSpringBoot(String content, String[] lines, ChangedFile file, List<Finding> findings, AnalysisContext context, Config config) {
         // Transactional on private method
         Pattern txPrivate = Pattern.compile("@Transactional[^;{}]*private\\s+\\w+\\s+\\w+", Pattern.DOTALL);
         Matcher m = txPrivate.matcher(content);
@@ -691,6 +692,110 @@ public class RuleEngine {
                 "I noticed @Scheduled using raw milliseconds.",
                 "Raw numbers can be hard to read (is that 60000 one minute or ten?). Using ISO-8601 strings is much clearer and less error-prone.",
                 "@Scheduled(fixedRateString = \"PT1M\") // Runs every 1 minute"));
+        }
+
+        // @CrossOrigin without restricted origins (security risk)
+        // Flag: @CrossOrigin with wildcard, OR @CrossOrigin with no origins arg (defaults differ by Spring version)
+        Pattern crossOriginWild = Pattern.compile("@CrossOrigin\\s*\\([^)]*(?:origins|value)\\s*=\\s*(?:\"\\*\"|\\{\\s*\"\\*\"\\s*\\})");
+        m = crossOriginWild.matcher(content);
+        while (m.find()) {
+            int line = getLineNumber(content, m.start());
+            if (!isInChangedLines(file, line)) continue;
+            findings.add(new Finding(Severity.MUST_FIX, Category.SPRING_BOOT, file.name, line, lines[line-1].trim(),
+                "I noticed @CrossOrigin is allowing all origins with '*'.",
+                "Allowing all origins exposes this endpoint to any website, which is a CORS security risk. Restrict it to only the domains you trust.",
+                "@CrossOrigin(origins = \"https://your-app.example.com\")"));
+        }
+        // Also warn on bare @CrossOrigin (no args) which allows all in many Spring versions
+        Pattern crossOriginBare = Pattern.compile("@CrossOrigin\\s*(?:(?=\\n|\\r|\\s*$)|(?=\\s+[^(]))");
+        m = crossOriginBare.matcher(content);
+        while (m.find()) {
+            int line = getLineNumber(content, m.start());
+            if (!isInChangedLines(file, line)) continue;
+            // Skip if the annotation has explicit args on this or next line
+            String peek = content.substring(m.start(), Math.min(content.length(), m.end() + 5)).trim();
+            if (peek.contains("(")) continue;
+            findings.add(new Finding(config.strictSpring ? Severity.MUST_FIX : Severity.SHOULD_FIX,
+                Category.SPRING_BOOT, file.name, line, lines[line-1].trim(),
+                "I noticed a @CrossOrigin annotation with no origin restriction.",
+                "Without an explicit 'origins' parameter, some Spring versions allow all origins by default. It's safer to explicitly restrict this to trusted domains.",
+                "@CrossOrigin(origins = \"https://your-app.example.com\")"));
+        }
+
+        // @Async on private method (AOP proxy can't intercept it, so @Async is silently ignored)
+        Pattern asyncPrivate = Pattern.compile("@Async[^;{}\\n]*\\n(?:\\s*@[^\\n]*\\n)*\\s*private\\s+\\w+\\s+\\w+\\s*\\(", Pattern.DOTALL);
+        m = asyncPrivate.matcher(content);
+        while (m.find()) {
+            int line = getLineNumber(content, m.start());
+            if (!isInChangedLines(file, line)) continue;
+            findings.add(new Finding(Severity.MUST_FIX, Category.SPRING_BOOT, file.name, line, lines[line-1].trim(),
+                "I noticed @Async on a private method.",
+                "Spring's AOP proxy cannot intercept private methods, so @Async is silently ignored here — the method will run synchronously. Make it public or move it to a separate @Service bean.",
+                "@Async\npublic CompletableFuture<Void> asyncMethod() { ... }"));
+        }
+
+        // @PostConstruct / @PreDestroy on static method (Spring ignores them on static methods)
+        Pattern lifecycleStatic = Pattern.compile("@(?:PostConstruct|PreDestroy)[^;{}\\n]*\\n(?:\\s*@[^\\n]*\\n)*\\s*(?:public|protected|private)\\s+static\\s+", Pattern.DOTALL);
+        m = lifecycleStatic.matcher(content);
+        while (m.find()) {
+            int line = getLineNumber(content, m.start());
+            if (!isInChangedLines(file, line)) continue;
+            findings.add(new Finding(Severity.MUST_FIX, Category.SPRING_BOOT, file.name, line, lines[line-1].trim(),
+                "I noticed @PostConstruct or @PreDestroy on a static method.",
+                "Spring ignores lifecycle callbacks on static methods. Remove 'static' or use an instance method instead.",
+                "// Remove static:\n@PostConstruct\npublic void init() { ... }"));
+        }
+
+        // @Transactional(readOnly=true) suggestion for query methods in @Service
+        if (context.isService) {
+            Pattern txReadOnly = Pattern.compile("@Transactional(?!\\([^)]*readOnly\\s*=\\s*true)(?:\\([^)]*\\))?\\s+(?:public|protected)\\s+[\\w<>\\[\\],\\s]+\\s+((?:get|find|list|fetch|load|search|count|query|select)\\w+)\\s*\\(");
+            m = txReadOnly.matcher(content);
+            while (m.find()) {
+                int line = getLineNumber(content, m.start());
+                if (!isInChangedLines(file, line)) continue;
+                String methodName = m.group(1);
+                findings.add(new Finding(Severity.CONSIDER, Category.SPRING_BOOT, file.name, line, lines[line-1].trim(),
+                    "Consider adding readOnly=true to @Transactional on '" + methodName + "'.",
+                    "Read-only transactions can improve performance by allowing the database to use optimizations like skipping dirty checking. Since this looks like a query method, it's usually safe to set readOnly=true.",
+                    "@Transactional(readOnly = true)\npublic " + methodName + "(...) { ... }"));
+            }
+        }
+
+        // ResponseEntity<?> wildcard (loses type safety)
+        Pattern responseWildcard = Pattern.compile("ResponseEntity<\\?>\\s+\\w+\\s*\\(");
+        m = responseWildcard.matcher(content);
+        while (m.find()) {
+            int line = getLineNumber(content, m.start());
+            if (!isInChangedLines(file, line)) continue;
+            findings.add(new Finding(config.strictSpring ? Severity.SHOULD_FIX : Severity.CONSIDER,
+                Category.SPRING_BOOT, file.name, line, lines[line-1].trim(),
+                "I noticed a ResponseEntity<?> with a wildcard type.",
+                "Using ResponseEntity<?> loses type safety and makes it harder for API clients to understand the response contract. Prefer a specific type like ResponseEntity<MyDto>.",
+                "public ResponseEntity<MyResponseDto> endpoint(...) { ... }"));
+        }
+
+        // Sensitive fields in @Entity without @JsonIgnore (data exposure risk)
+        if (context.isEntity) {
+            Pattern sensitiveField = Pattern.compile("(?:private|protected)\\s+(?:String|char\\[\\])\\s+(password|secret|token|apiKey|apiSecret|creditCard|cvv|ssn)\\b");
+            m = sensitiveField.matcher(content);
+            while (m.find()) {
+                int line = getLineNumber(content, m.start());
+                if (!isInChangedLines(file, line)) continue;
+                // Check if @JsonIgnore or @JsonProperty(access = ...) appears in the 3 lines above
+                boolean hasJsonIgnore = false;
+                for (int i = Math.max(0, line - 4); i < line - 1; i++) {
+                    if (lines[i].contains("@JsonIgnore") || lines[i].contains("JsonProperty")) {
+                        hasJsonIgnore = true;
+                        break;
+                    }
+                }
+                if (!hasJsonIgnore) {
+                    findings.add(new Finding(Severity.MUST_FIX, Category.SPRING_BOOT, file.name, line, lines[line-1].trim(),
+                        "I noticed a sensitive field '" + m.group(1) + "' in an @Entity without @JsonIgnore.",
+                        "Without @JsonIgnore, this sensitive field will be serialized into JSON responses, leaking it to API clients. Always exclude sensitive fields from serialization.",
+                        "@JsonIgnore\nprivate String " + m.group(1) + ";"));
+                }
+            }
         }
     }
 
@@ -1006,6 +1111,92 @@ public class RuleEngine {
                     "I noticed string comparison using '" + op + "'.",
                     "In Java, '" + op + "' compares object references (memory addresses), not the actual string content. This might work for interned strings but is risky in production.",
                     fix));
+            }
+        }
+    }
+
+    private static void reviewJavaModern(String content, String[] lines, ChangedFile file, List<Finding> findings, Config config) {
+        // 1. Legacy java.util.Date / Calendar / SimpleDateFormat usage
+        Pattern legacyDate = Pattern.compile(
+            "(?:new\\s+(?:java\\.util\\.)?(?:Date|GregorianCalendar)\\s*\\(|Calendar\\.getInstance\\s*\\(|new\\s+SimpleDateFormat\\s*\\()");
+        Matcher m = legacyDate.matcher(content);
+        while (m.find()) {
+            int line = getLineNumber(content, m.start());
+            if (!isInChangedLines(file, line)) continue;
+            String code = lines[line - 1].trim();
+            if (code.contains("//") || code.startsWith("*")) continue; // skip comments
+            findings.add(new Finding(Severity.SHOULD_FIX, Category.CODE_QUALITY, file.name, line, code,
+                "I noticed use of legacy java.util.Date / Calendar / SimpleDateFormat.",
+                "These classes are mutable, not thread-safe, and have confusing API design. Java 8+ introduced java.time (LocalDate, ZonedDateTime, DateTimeFormatter) as a clean replacement.",
+                "// Use java.time instead:\nLocalDateTime now = LocalDateTime.now();\nDateTimeFormatter fmt = DateTimeFormatter.ofPattern(\"yyyy-MM-dd\");"));
+        }
+
+        // 2. Raw collection types (missing generic type parameter)
+        // Matches: new ArrayList(), new HashMap() etc. WITHOUT a following < (the type param)
+        Pattern rawCollection = Pattern.compile(
+            "new\\s+(ArrayList|HashMap|HashSet|LinkedList|TreeMap|TreeSet|LinkedHashMap|LinkedHashSet|PriorityQueue|ArrayDeque)\\s*(?!\\s*<)\\s*\\(");
+        m = rawCollection.matcher(content);
+        while (m.find()) {
+            int line = getLineNumber(content, m.start());
+            if (!isInChangedLines(file, line)) continue;
+            String typeName = m.group(1);
+            String code = lines[line - 1].trim();
+            findings.add(new Finding(Severity.SHOULD_FIX, Category.CODE_QUALITY, file.name, line, code,
+                "I noticed a raw '" + typeName + "' without a type parameter.",
+                "Raw types skip generics type checking and can cause ClassCastException at runtime. Use the diamond operator or explicit type to keep it type-safe.",
+                "new " + typeName + "<>()  // or: new " + typeName + "<ExpectedType>()"));
+        }
+
+        // 3. Collections.EMPTY_LIST / EMPTY_SET / EMPTY_MAP (type-unsafe, use emptyList() etc.)
+        Pattern emptyCollections = Pattern.compile("Collections\\.(EMPTY_LIST|EMPTY_SET|EMPTY_MAP)\\b");
+        m = emptyCollections.matcher(content);
+        while (m.find()) {
+            int line = getLineNumber(content, m.start());
+            if (!isInChangedLines(file, line)) continue;
+            String field = m.group(1);
+            String replacement = field.equals("EMPTY_LIST") ? "emptyList()" : field.equals("EMPTY_SET") ? "emptySet()" : "emptyMap()";
+            findings.add(new Finding(Severity.SHOULD_FIX, Category.CODE_QUALITY, file.name, line, lines[line-1].trim(),
+                "I noticed " + field + " is being used instead of the type-safe alternative.",
+                "Collections.EMPTY_LIST/SET/MAP are raw types and will generate unchecked warnings. The type-safe Collections.emptyList/emptySet/emptyMap() methods were introduced in Java 5 for exactly this reason.",
+                "Collections." + replacement));
+        }
+
+        // 4. Double-brace initialization (creates anonymous inner class — memory leak risk)
+        Pattern doubleBrace = Pattern.compile("new\\s+\\w+(?:<[^>]*>)?\\s*\\(\\s*\\)\\s*\\{\\s*\\{");
+        m = doubleBrace.matcher(content);
+        while (m.find()) {
+            int line = getLineNumber(content, m.start());
+            if (!isInChangedLines(file, line)) continue;
+            findings.add(new Finding(Severity.SHOULD_FIX, Category.CODE_QUALITY, file.name, line, lines[line-1].trim(),
+                "I noticed double-brace initialization here.",
+                "Double-brace initialization creates an anonymous inner class that holds an implicit reference to the outer class. This can cause memory leaks, prevents equals() from working correctly, and breaks serialization. Use Map.of(), List.of(), or explicit add() calls instead.",
+                "// Use factory methods:\nMap<String, String> map = new HashMap<>(Map.of(\"key\", \"value\"));\n// Or explicit:\nList<String> list = new ArrayList<>();\nlist.add(\"item\");"));
+        }
+
+        // 5. Math.random() for anything non-trivial (use ThreadLocalRandom or SecureRandom)
+        Pattern mathRandom = Pattern.compile("Math\\.random\\(\\)");
+        m = mathRandom.matcher(content);
+        while (m.find()) {
+            int line = getLineNumber(content, m.start());
+            if (!isInChangedLines(file, line)) continue;
+            findings.add(new Finding(Severity.SHOULD_FIX, Category.CODE_QUALITY, file.name, line, lines[line-1].trim(),
+                "I noticed Math.random() being used.",
+                "Math.random() uses a shared, unsynchronized Random instance which can be a bottleneck under concurrency. Use ThreadLocalRandom.current().nextDouble() for performance, or SecureRandom for security-sensitive cases.",
+                "// For general use:\ndouble val = ThreadLocalRandom.current().nextDouble();\n// For security-sensitive:\ndouble val = new SecureRandom().nextDouble();"));
+        }
+
+        // 6. instanceof + explicit cast on next token (suggest Java 16+ pattern matching)
+        if (config.javaSourceVersion >= 16) {
+            Pattern instanceofCast = Pattern.compile("instanceof\\s+(\\w+)\\b[^;{]*\\n[^;{]*\\(\\s*\\1\\s*\\)");
+            m = instanceofCast.matcher(content);
+            while (m.find()) {
+                int line = getLineNumber(content, m.start());
+                if (!isInChangedLines(file, line)) continue;
+                String castType = m.group(1);
+                findings.add(new Finding(Severity.CONSIDER, Category.CODE_QUALITY, file.name, line, lines[line-1].trim(),
+                    "I noticed an instanceof check followed by a cast to " + castType + ".",
+                    "Pattern matching for instanceof (Java 16+) lets you combine the check and cast in one step, eliminating the redundant cast and making the code cleaner.",
+                    "// Java 16+ pattern matching:\nif (obj instanceof " + castType + " typed) {\n    typed.doSomething();\n}"));
             }
         }
     }

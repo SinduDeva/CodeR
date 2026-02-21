@@ -6,6 +6,16 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 public class ImpactAnalyzer {
+    private static volatile boolean debugEnabled = false;
+
+    public static void setDebugEnabled(boolean enabled) {
+        debugEnabled = enabled;
+    }
+
+    private static void debug(String msg) {
+        if (debugEnabled) System.out.println(msg);
+    }
+
     private static final Set<String> NON_METHOD_TOKENS;
 
     static {
@@ -36,7 +46,7 @@ public class ImpactAnalyzer {
             int bodyBraceLine = getLineNumber(content, bodyBracePos);
             int bodyBraceCharIdx = getCharIndexInLine(content, bodyBracePos);
             int endLine = findMethodEndLine(lines, bodyBraceLine, bodyBraceCharIdx);
-            System.out.println("[DEBUG] ImpactAnalyzer found method: " + methodName +
+            debug("[DEBUG] ImpactAnalyzer found method: " + methodName +
                     " (sig start: " + startLine + ", name line: " + methodNameLine + ", body brace line: " + bodyBraceLine + ", end: " + endLine + ")");
             if (endLine == -1) endLine = startLine;
 
@@ -276,7 +286,7 @@ public class ImpactAnalyzer {
 
         // 4. Qualified calls: instanceName.method(...)
         if (instanceNames != null && !instanceNames.isEmpty()) {
-            System.out.println("[DEBUG] getMethodsCalling: checking qualified calls with instanceNames=" + instanceNames + ", touchedMethods=" + touchedMethods + ", allowBroadFallback=" + allowBroadFallback);
+            debug("[DEBUG] getMethodsCalling: checking qualified calls with instanceNames=" + instanceNames + ", touchedMethods=" + touchedMethods + ", allowBroadFallback=" + allowBroadFallback);
             for (String instanceName : instanceNames) {
                 if (instanceName == null || instanceName.isBlank()) continue;
                 for (String method : touchedMethods) {
@@ -292,10 +302,10 @@ public class ImpactAnalyzer {
                         matchCount++;
                         int callPos = cm.start();
                         String enclosing = findEnclosingMethod(methodsInFile, callPos);
-                        System.out.println("[DEBUG] getMethodsCalling: match at position " + callPos + ", enclosing method: " + (enclosing == null ? "NULL" : enclosing));
+                        debug("[DEBUG] getMethodsCalling: match at position " + callPos + ", enclosing method: " + (enclosing == null ? "NULL" : enclosing));
                         if (enclosing != null) callers.add(enclosing);
                     }
-                    System.out.println("[DEBUG] getMethodsCalling: pattern '" + callPattern + "' found " + matchCount + " matches");
+                    debug("[DEBUG] getMethodsCalling: pattern '" + callPattern + "' found " + matchCount + " matches");
 
                     // Method reference: instanceName::method (streams/optionals)
                     String refPattern = "\\b" + Pattern.quote(instanceName) + "\\s*::\\s*" + Pattern.quote(pureMethodName) + "\\b";
@@ -409,18 +419,18 @@ public class ImpactAnalyzer {
 
     private static String findEnclosingMethod(List<MethodSpan> spans, int pos) {
         if (spans == null) {
-            System.out.println("[DEBUG] findEnclosingMethod: spans is null");
+            debug("[DEBUG] findEnclosingMethod: spans is null");
             return null;
         }
-        System.out.println("[DEBUG] findEnclosingMethod: checking position " + pos + " against " + spans.size() + " method spans");
+        debug("[DEBUG] findEnclosingMethod: checking position " + pos + " against " + spans.size() + " method spans");
         for (MethodSpan s : spans) {
-            System.out.println("[DEBUG] findEnclosingMethod: span " + s.name + " [" + s.start + ", " + s.endExclusive + ")");
+            debug("[DEBUG] findEnclosingMethod: span " + s.name + " [" + s.start + ", " + s.endExclusive + ")");
             if (pos >= s.start && pos < s.endExclusive) {
-                System.out.println("[DEBUG] findEnclosingMethod: position " + pos + " is inside " + s.name);
+                debug("[DEBUG] findEnclosingMethod: position " + pos + " is inside " + s.name);
                 return s.name;
             }
         }
-        System.out.println("[DEBUG] findEnclosingMethod: position " + pos + " not found in any method span");
+        debug("[DEBUG] findEnclosingMethod: position " + pos + " not found in any method span");
         return null;
     }
 
@@ -521,7 +531,7 @@ public class ImpactAnalyzer {
                 }
             }
         }
-        System.out.println("[DEBUG] extractInstanceNames: targetSimpleName=" + targetSimpleName + ", targetFqn=" + targetFqn + ", extracted=" + instanceNames);
+        debug("[DEBUG] extractInstanceNames: targetSimpleName=" + targetSimpleName + ", targetFqn=" + targetFqn + ", extracted=" + instanceNames);
         return instanceNames;
     }
 
@@ -567,7 +577,7 @@ public class ImpactAnalyzer {
             }
             if (lines[classLineIdx].contains("class " + className)) break;
         }
-        System.out.println("[DEBUG] extractControllerEndpoints: className=" + className + ", classPrefix=" + classPrefix + ", touchedMethods=" + touchedMethods);
+        debug("[DEBUG] extractControllerEndpoints: className=" + className + ", classPrefix=" + classPrefix + ", touchedMethods=" + touchedMethods);
 
         Pattern methodMapping = Pattern.compile("@(?:RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\\b");
         Pattern pathPattern = Pattern.compile("(?:value|path)\\s*=\\s*\"([^\"]+)\"|\"([^\"]+)\"");
@@ -579,7 +589,7 @@ public class ImpactAnalyzer {
             Pattern decl = Pattern.compile("(?s)(?:public|protected|private)\\s+[^{;=]+?\\b" + Pattern.quote(methodName) + "\\s*\\(");
             Matcher dm = decl.matcher(content);
             if (!dm.find()) {
-                System.out.println("[DEBUG] extractControllerEndpoints: method declaration not found for " + methodName);
+                debug("[DEBUG] extractControllerEndpoints: method declaration not found for " + methodName);
                 continue;
             }
             
@@ -594,41 +604,41 @@ public class ImpactAnalyzer {
                 charIdx++;
             }
             if (depth != 0) {
-                System.out.println("[DEBUG] extractControllerEndpoints: unmatched parentheses for " + methodName);
+                debug("[DEBUG] extractControllerEndpoints: unmatched parentheses for " + methodName);
                 continue;
             }
 
             String matchedDecl = dm.group();
-            System.out.println("[DEBUG] extractControllerEndpoints: matched declaration snippet: " + matchedDecl.substring(0, Math.min(150, matchedDecl.length())).replaceAll("\\s+", " "));
+            debug("[DEBUG] extractControllerEndpoints: matched declaration snippet: " + matchedDecl.substring(0, Math.min(150, matchedDecl.length())).replaceAll("\\s+", " "));
             
             int publicPos = matchedDecl.indexOf("public");
             if (publicPos == -1) publicPos = matchedDecl.indexOf("protected");
             if (publicPos == -1) publicPos = matchedDecl.indexOf("private");
             int methodLine = getLineNumber(content, dm.start() + publicPos);
             int methodLineIdx = Math.max(0, Math.min(lines.length - 1, methodLine - 1));
-            System.out.println("[DEBUG] extractControllerEndpoints: found method " + methodName + " at line " + methodLine + " (idx=" + methodLineIdx + "), match start was at line " + getLineNumber(content, dm.start()) + ", publicPos=" + publicPos);
+            debug("[DEBUG] extractControllerEndpoints: found method " + methodName + " at line " + methodLine + " (idx=" + methodLineIdx + "), match start was at line " + getLineNumber(content, dm.start()) + ", publicPos=" + publicPos);
 
             int annoStart = methodLineIdx - 1;
             int lastAnnotationLine = -1;
             while (annoStart >= 0 && annoStart >= methodLineIdx - 50) {
                 String l = lines[annoStart].trim();
-                System.out.println("[DEBUG] extractControllerEndpoints: scanning line " + (annoStart+1) + ": '" + l + "'");
+                debug("[DEBUG] extractControllerEndpoints: scanning line " + (annoStart+1) + ": '" + l + "'");
                 if (l.isEmpty()) {
                     annoStart--;
                     continue;
                 }
                 if (l.startsWith("@")) {
                     lastAnnotationLine = annoStart;
-                    System.out.println("[DEBUG] extractControllerEndpoints: found annotation at line " + (annoStart+1));
+                    debug("[DEBUG] extractControllerEndpoints: found annotation at line " + (annoStart+1));
                     annoStart--;
                     continue;
                 }
                 if (l.contains("=") || l.endsWith(")") || l.endsWith(",")) {
-                    System.out.println("[DEBUG] extractControllerEndpoints: treating line " + (annoStart+1) + " as annotation continuation");
+                    debug("[DEBUG] extractControllerEndpoints: treating line " + (annoStart+1) + " as annotation continuation");
                     annoStart--;
                     continue;
                 }
-                System.out.println("[DEBUG] extractControllerEndpoints: stopping backward scan at line " + (annoStart+1) + " (non-annotation, non-empty)");
+                debug("[DEBUG] extractControllerEndpoints: stopping backward scan at line " + (annoStart+1) + " (non-annotation, non-empty)");
                 break;
             }
             if (lastAnnotationLine >= 0) {
@@ -636,11 +646,11 @@ public class ImpactAnalyzer {
             } else {
                 annoStart = Math.max(0, methodLineIdx - 1);
             }
-            System.out.println("[DEBUG] extractControllerEndpoints: annotation block range [" + annoStart + ", " + methodLineIdx + "), lastAnnotationLine=" + lastAnnotationLine);
+            debug("[DEBUG] extractControllerEndpoints: annotation block range [" + annoStart + ", " + methodLineIdx + "), lastAnnotationLine=" + lastAnnotationLine);
 
             for (int i = Math.max(0, annoStart); i < methodLineIdx; i++) {
                 if (!methodMapping.matcher(lines[i]).find()) continue;
-                System.out.println("[DEBUG] extractControllerEndpoints: found mapping annotation at line " + (i+1) + ": " + lines[i]);
+                debug("[DEBUG] extractControllerEndpoints: found mapping annotation at line " + (i+1) + ": " + lines[i]);
 
                 StringBuilder annoBuf = new StringBuilder(lines[i]).append(' ');
                 int j = i + 1;
@@ -651,22 +661,22 @@ public class ImpactAnalyzer {
                 if (j < methodLineIdx) {
                     annoBuf.append(lines[j]).append(' ');
                 }
-                System.out.println("[DEBUG] extractControllerEndpoints: buffered annotation: " + annoBuf.toString().substring(0, Math.min(200, annoBuf.length())));
+                debug("[DEBUG] extractControllerEndpoints: buffered annotation: " + annoBuf.toString().substring(0, Math.min(200, annoBuf.length())));
 
                 String methodPath = "";
                 Matcher pm = pathPattern.matcher(annoBuf.toString());
                 if (pm.find()) {
                     methodPath = pm.group(1) != null ? pm.group(1) : pm.group(2);
-                    System.out.println("[DEBUG] extractControllerEndpoints: extracted path=" + methodPath);
+                    debug("[DEBUG] extractControllerEndpoints: extracted path=" + methodPath);
                 } else {
-                    System.out.println("[DEBUG] extractControllerEndpoints: NO PATH MATCH in buffered annotation");
+                    debug("[DEBUG] extractControllerEndpoints: NO PATH MATCH in buffered annotation");
                 }
                 String fullPath = (classPrefix + "/" + methodPath).replaceAll("//+", "/");
                 endpoints.add(className + "." + methodName + " [" + fullPath + "]");
             }
         }
 
-        System.out.println("[DEBUG] extractControllerEndpoints: final endpoints=" + endpoints);
+        debug("[DEBUG] extractControllerEndpoints: final endpoints=" + endpoints);
         return endpoints.stream().distinct().collect(Collectors.toList());
     }
 

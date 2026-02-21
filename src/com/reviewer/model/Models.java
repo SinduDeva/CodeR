@@ -161,5 +161,7 @@ public class Models {
         public boolean enableStructuralImpact = true;
         public String pmdPath = "pmd";
         public String pmdRulesetPath = "config/pmd/changelens-ruleset.xml";
+        // Target Java source version; used to gate version-specific rules (e.g. pattern matching >= 16)
+        public int javaSourceVersion = 17;
     }
 }

@@ -122,6 +122,7 @@ public class Main {
         config.enableStructuralImpact = Boolean.parseBoolean(props.getProperty("enable.structural.impact", String.valueOf(config.enableStructuralImpact)));
         config.pmdPath = props.getProperty("pmd.path", config.pmdPath);
         config.pmdRulesetPath = props.getProperty("pmd.ruleset.path", config.pmdRulesetPath);
+        config.javaSourceVersion = Integer.parseInt(props.getProperty("java.source.version", String.valueOf(config.javaSourceVersion)));
     }
 
     private static void openReport(String reportPath) {

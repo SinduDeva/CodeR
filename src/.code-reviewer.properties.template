@@ -47,3 +47,8 @@ enable.transitive.api.discovery=true
 transitive.api.discovery.max.depth=8
 transitive.api.discovery.max.visited.files=200
 transitive.api.discovery.max.controllers=10
+
+# Java version of the projects being reviewed
+# Controls which version-specific rules are active (e.g. pattern-matching instanceof >= 16)
+# Supported: 8, 11, 17, 21
+java.source.version=17

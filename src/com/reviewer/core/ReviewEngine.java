@@ -65,12 +65,12 @@ public class ReviewEngine {
     public List<ChangedFile> getStagedFiles() {
         List<String> allStaged = runGit("git", "diff", "--cached", "--name-only");
         this.totalStagedFiles = allStaged.size();
-        debug("[DEBUG] All staged files (" + totalStagedFiles + "): " + allStaged);
-        
+        debug("All staged files (" + totalStagedFiles + "): " + allStaged);
+
         List<String> javaFiles = allStaged.stream()
             .filter(f -> f.endsWith(".java"))
             .collect(Collectors.toList());
-        debug("[DEBUG] Java files found: " + javaFiles);
+        debug("Java files found: " + javaFiles);
             
         return javaFiles.stream()
             .map(f -> {
@@ -88,8 +88,7 @@ public class ReviewEngine {
     private Set<Integer> expandChangedLinesToMethodScope(String filePath, Set<Integer> changedLines) throws IOException {
         List<String> fileLines = Files.readAllLines(Path.of(filePath));
         List<LineRange> methodRanges = findMethodRanges(fileLines);
-        System.out.println("[DEBUG]filepath, changedlines: " + filePath +
-                changedLines);
+        debug("filepath, changedlines: " + filePath + changedLines);
         if (methodRanges.isEmpty()) return changedLines;
 
         Set<Integer> expanded = new HashSet<>(changedLines);
@@ -201,7 +200,7 @@ public class ReviewEngine {
     }
 
     public String run(List<ChangedFile> allChangedFiles) throws IOException {
-        System.out.println("[DEBUG] Received " + allChangedFiles.size() + " files for review.");
+        debug("Received " + allChangedFiles.size() + " files for review.");
         List<ChangedFile> testFiles = allChangedFiles.stream()
             .filter(this::isTestFile)
             .collect(Collectors.toList());
@@ -209,10 +208,10 @@ public class ReviewEngine {
             .filter(f -> !isTestFile(f))
             .collect(Collectors.toList());
 
-        System.out.println("[DEBUG] Test files count: " + testFiles.size());
-        System.out.println("[DEBUG] Non-test files to review: " + changedFiles.size());
+        debug("Test files count: " + testFiles.size());
+        debug("Non-test files to review: " + changedFiles.size());
         for (ChangedFile f : changedFiles) {
-            System.out.println("[DEBUG] Reviewing: " + f.path);
+            debug("Reviewing: " + f.path);
         }
 
         if (changedFiles.isEmpty()) {
@@ -226,12 +225,12 @@ public class ReviewEngine {
         // Integration of PMD as an optional enhancement with graceful fallback
         if (config.enablePmdAnalysis) {
             try {
-                System.out.println("[DEBUG] PMD Path: " + config.pmdPath);
-                System.out.println("[DEBUG] PMD Ruleset: " + config.pmdRulesetPath);
-                System.out.println("[DEBUG] Files to analyze: " + changedFiles.size());
+                debug("PMD Path: " + config.pmdPath);
+                debug("PMD Ruleset: " + config.pmdRulesetPath);
+                debug("Files to analyze: " + changedFiles.size());
                 List<Finding> pmdFindings = com.reviewer.analysis.PmdAnalyzer.analyze(changedFiles, config);
                 findings.addAll(pmdFindings);
-                System.out.println(pmdFindings);
+                debug("PMD findings: " + pmdFindings);
             } catch (Exception e) {
                 System.err.println("PMD analysis failed, falling back to built-in rules: " + e.getMessage());
             }
@@ -258,7 +257,7 @@ public class ReviewEngine {
     private void reviewFile(ChangedFile file) throws IOException {
         Path fullPath = Path.of(file.path).toAbsolutePath();
         if (!Files.exists(fullPath)) {
-            System.out.println("[DEBUG] File not found for review: " + fullPath);
+            debug("File not found for review: " + fullPath);
             return;
         }
         String content = Files.readString(fullPath);
@@ -279,6 +278,7 @@ public class ReviewEngine {
     }
 
     private List<ImpactEntry> analyzeImpact(List<ChangedFile> files) {
+        ImpactAnalyzer.setDebugEnabled(config != null && config.debug);
         List<ImpactEntry> impact = new ArrayList<>();
         for (ChangedFile f : files) {
             ImpactEntry entry = new ImpactEntry(f.name);
