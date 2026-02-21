@@ -1,0 +1,23 @@
+# Compiled output
+bin/
+*.class
+
+# JAR artifacts (built by install.bat)
+*.jar
+
+# PMD download cache
+pmd.zip
+pmd-temp/
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Code reviewer cache
+.code-reviewer-cache/
