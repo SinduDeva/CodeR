@@ -65,7 +65,7 @@ public class TreeSitterAnalyzer {
 
         // 1. Detect Class-Level Mapping
         String classPrefix = "";
-        Pattern mappingStart = Pattern.compile("@(?:RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\\b");
+        Pattern mappingStart = Pattern.compile("@(Request|Get|Post|Put|Delete|Patch)Mapping\\b");
         Pattern pathPattern = Pattern.compile("(?:value|path)\\s*=\\s*\"([^\"]+)\"|\"([^\"]+)\"");
         Pattern classMappingStart = Pattern.compile("@(?:RequestMapping|PostMapping|GetMapping|PutMapping|DeleteMapping|PatchMapping)\\s*\\((?:(?:value|path)\\s*=\\s*)?\"([^\"]+)\"");
         for (int i = 0; i < Math.min(lines.length, 80); i++) {
@@ -94,7 +94,7 @@ public class TreeSitterAnalyzer {
         }
 
         List<MethodRange> methods = findMethodRanges(lines);
-        Pattern methodMapping = Pattern.compile("@(?:RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\\b");
+        Pattern methodMapping = Pattern.compile("@(Request|Get|Post|Put|Delete|Patch)Mapping\\b");
 
         for (MethodRange method : methods) {
             if (!touchedMethods.contains(method.methodName)) {
@@ -118,7 +118,9 @@ public class TreeSitterAnalyzer {
             annoStart = Math.min(methodLineIdx - 1, annoStart + 1);
 
             for (int i = Math.max(0, annoStart); i < methodLineIdx; i++) {
-                if (!methodMapping.matcher(lines[i]).find()) continue;
+                Matcher mm = methodMapping.matcher(lines[i]);
+                if (!mm.find()) continue;
+                String annotationType = mm.group(1);
 
                 StringBuilder annoBuf = new StringBuilder(lines[i]).append(' ');
                 int j = i + 1;
@@ -135,11 +137,26 @@ public class TreeSitterAnalyzer {
                 if (pm.find()) {
                     methodPath = pm.group(1) != null ? pm.group(1) : pm.group(2);
                 }
+                String httpVerb = verbFromAnnotationType(annotationType, annoBuf.toString());
                 String fullPath = (classPrefix + "/" + methodPath).replaceAll("//+", "/");
-                endpoints.add(className + "." + method.methodName + " [" + fullPath + "]");
+                endpoints.add(className + "." + method.methodName + " [" + httpVerb + " " + fullPath + "]");
             }
         }
         return endpoints.stream().distinct().collect(Collectors.toList());
+    }
+
+    private static String verbFromAnnotationType(String type, String annoBuf) {
+        switch (type) {
+            case "Get":    return "GET";
+            case "Post":   return "POST";
+            case "Put":    return "PUT";
+            case "Delete": return "DELETE";
+            case "Patch":  return "PATCH";
+            case "Request":
+                Matcher m = Pattern.compile("method\\s*=\\s*RequestMethod\\.(GET|POST|PUT|DELETE|PATCH)").matcher(annoBuf);
+                return m.find() ? m.group(1) : "ANY";
+            default: return "GET";
+        }
     }
 
     private static List<MethodRange> findMethodRanges(String[] lines) {

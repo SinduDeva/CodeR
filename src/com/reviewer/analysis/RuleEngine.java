@@ -16,6 +16,7 @@ public class RuleEngine {
         reviewExceptionHandling(content, lines, file, findings, context);
         reviewLogging(content, lines, file, findings, context, methodRanges);
         reviewSpringBoot(content, lines, file, findings, context, config);
+        reviewOpenApi(content, lines, file, findings, context);
         reviewPerformance(content, lines, file, findings, context);
         reviewCodeQuality(content, lines, file, findings, context, config);
         reviewJavaModern(content, lines, file, findings, config);
@@ -795,6 +796,114 @@ public class RuleEngine {
                         "Without @JsonIgnore, this sensitive field will be serialized into JSON responses, leaking it to API clients. Always exclude sensitive fields from serialization.",
                         "@JsonIgnore\nprivate String " + m.group(1) + ";"));
                 }
+            }
+        }
+
+        // @Transactional self-invocation: this.transactionalMethod() bypasses the Spring AOP proxy
+        Pattern selfInvoke = Pattern.compile("\\bthis\\.(\\w+)\\s*\\(");
+        m = selfInvoke.matcher(content);
+        while (m.find()) {
+            String calledMethod = m.group(1);
+            int line = getLineNumber(content, m.start());
+            if (!isInChangedLines(file, line)) continue;
+            // Check if the called method is @Transactional in this class
+            Pattern txOnMethod = Pattern.compile("@Transactional[^;{}]*(?:public|protected)\\s+\\S+\\s+" + Pattern.quote(calledMethod) + "\\s*\\(");
+            if (txOnMethod.matcher(content).find()) {
+                findings.add(new Finding(Severity.MUST_FIX, Category.SPRING_BOOT, file.name, line, lines[line-1].trim(),
+                    "I noticed a self-invocation call this." + calledMethod + "() to a @Transactional method.",
+                    "Spring's proxy-based AOP intercepts calls from outside the bean, not internal 'this.' calls. The @Transactional on '" + calledMethod + "' will be silently ignored — no transaction will be started for that inner call.",
+                    "// Option 1: Self-inject the bean\n@Autowired private MyService self;\nself." + calledMethod + "();\n\n// Option 2: Move to a separate @Service bean and inject it"));
+            }
+        }
+
+        // @Cacheable on private method (AOP proxy cannot intercept it)
+        Pattern cacheablePrivate = Pattern.compile("@Cacheable[^;{}\\n]*\\n(?:\\s*@[^\\n]*\\n)*\\s*private\\s+\\w+\\s+\\w+\\s*\\(", Pattern.DOTALL);
+        m = cacheablePrivate.matcher(content);
+        while (m.find()) {
+            int line = getLineNumber(content, m.start());
+            if (!isInChangedLines(file, line)) continue;
+            findings.add(new Finding(Severity.MUST_FIX, Category.SPRING_BOOT, file.name, line, lines[line-1].trim(),
+                "I noticed @Cacheable on a private method.",
+                "Spring's AOP proxy cannot intercept private methods, so @Cacheable is silently ignored here — the method will be called every time without any caching. Make it public or move it to a separate @Service bean.",
+                "@Cacheable(value = \"items\", key = \"#id\")\npublic Item findById(Long id) { ... }"));
+        }
+    }
+
+    private static void reviewOpenApi(String content, String[] lines, ChangedFile file, List<Finding> findings, AnalysisContext context) {
+        // Only relevant for REST controllers
+        if (!context.isController) return;
+
+        // Rule 1: @RestController / @Controller missing @Tag annotation (OpenAPI grouping)
+        if (!content.contains("@Tag(")) {
+            // Find the class declaration line to report on
+            int classLine = -1;
+            for (int i = 0; i < Math.min(lines.length, 60); i++) {
+                if (lines[i].contains("class ") && (lines[i].contains("@RestController") || lines[i].contains("@Controller")
+                        || (i > 0 && (lines[i-1].contains("@RestController") || lines[i-1].contains("@Controller"))))) {
+                    classLine = i + 1;
+                    break;
+                }
+                if (lines[i].contains("class ") && context.classAnnotations.contains("RestController")) {
+                    classLine = i + 1;
+                    break;
+                }
+            }
+            if (classLine > 0 && isInChangedLines(file, classLine)) {
+                findings.add(new Finding(Severity.CONSIDER, Category.OPEN_API, file.name, classLine, lines[classLine-1].trim(),
+                    "I noticed this REST controller is missing an @Tag annotation.",
+                    "@Tag groups related endpoints together in the OpenAPI/Swagger UI, making the API easier to navigate for consumers. It maps to the 'tag' section in the generated OpenAPI spec.",
+                    "@Tag(name = \"" + file.name.replace(".java", "") + "\", description = \"APIs for ...\")"));
+            }
+        }
+
+        // Rule 2: Mapping annotation without @Operation (undocumented endpoint)
+        Pattern mappingAnno = Pattern.compile("@(?:GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping)\\b");
+        Matcher m = mappingAnno.matcher(content);
+        while (m.find()) {
+            int line = getLineNumber(content, m.start());
+            if (!isInChangedLines(file, line)) continue;
+            // Check the 6 lines above this mapping annotation for @Operation
+            boolean hasOperation = false;
+            for (int i = Math.max(0, line - 7); i < line - 1; i++) {
+                if (lines[i].contains("@Operation")) {
+                    hasOperation = true;
+                    break;
+                }
+            }
+            if (!hasOperation) {
+                findings.add(new Finding(Severity.CONSIDER, Category.OPEN_API, file.name, line, lines[line-1].trim(),
+                    "I noticed this endpoint is missing an @Operation annotation.",
+                    "@Operation provides a human-readable summary and description for the endpoint in the generated OpenAPI spec / Swagger UI. Without it, API consumers see no documentation for what this endpoint does.",
+                    "@Operation(summary = \"Short description\", description = \"Detailed description of what this endpoint does\")"));
+            }
+        }
+
+        // Rule 3: @Operation present but no @ApiResponse declared (no documented response codes)
+        if (content.contains("@Operation") && !content.contains("@ApiResponse")) {
+            Matcher om = Pattern.compile("@Operation\\b").matcher(content);
+            while (om.find()) {
+                int line = getLineNumber(content, om.start());
+                if (!isInChangedLines(file, line)) continue;
+                findings.add(new Finding(Severity.CONSIDER, Category.OPEN_API, file.name, line, lines[line-1].trim(),
+                    "I noticed @Operation is used but no @ApiResponse annotations are declared.",
+                    "@ApiResponse documents the possible HTTP response codes and their meaning for this endpoint. Without it, the OpenAPI spec won't describe what 200, 400, 404, or 500 responses look like.",
+                    "@ApiResponses({\n    @ApiResponse(responseCode = \"200\", description = \"Successful operation\"),\n    @ApiResponse(responseCode = \"400\", description = \"Invalid input\"),\n    @ApiResponse(responseCode = \"404\", description = \"Not found\")\n})"));
+            }
+        }
+
+        // Rule 4: Method parameter with complex object type in controller but no @Parameter or @Schema
+        Pattern methodParam = Pattern.compile("(?:@RequestParam|@PathVariable|@RequestHeader)\\s+(?:[\\w<>\\[\\]]+)\\s+(\\w+)");
+        m = methodParam.matcher(content);
+        while (m.find()) {
+            int line = getLineNumber(content, m.start());
+            if (!isInChangedLines(file, line)) continue;
+            // Check if @Parameter annotation is present on preceding line
+            String prevLine = line > 1 ? lines[line - 2].trim() : "";
+            if (!prevLine.contains("@Parameter")) {
+                findings.add(new Finding(Severity.CONSIDER, Category.OPEN_API, file.name, line, lines[line-1].trim(),
+                    "I noticed an endpoint parameter without an @Parameter annotation.",
+                    "@Parameter documents what this parameter does, whether it's required, and its example values in the OpenAPI spec. This is especially useful for path variables and query parameters.",
+                    "@Parameter(description = \"Description of " + m.group(1) + "\", required = true, example = \"example-value\")"));
             }
         }
     }

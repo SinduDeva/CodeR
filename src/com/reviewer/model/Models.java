@@ -13,6 +13,7 @@ public class Models {
         EXCEPTION_HANDLING("Exception Handling"),
         LOGGING("Logging"),
         SPRING_BOOT("Spring Boot"),
+        OPEN_API("OpenAPI / Swagger"),
         PERFORMANCE("Performance"),
         CODE_QUALITY("Code Quality");
         

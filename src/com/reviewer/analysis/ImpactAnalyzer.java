@@ -579,7 +579,7 @@ public class ImpactAnalyzer {
         }
         debug("[DEBUG] extractControllerEndpoints: className=" + className + ", classPrefix=" + classPrefix + ", touchedMethods=" + touchedMethods);
 
-        Pattern methodMapping = Pattern.compile("@(?:RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\\b");
+        Pattern methodMapping = Pattern.compile("@(Request|Get|Post|Put|Delete|Patch)Mapping\\b");
         Pattern pathPattern = Pattern.compile("(?:value|path)\\s*=\\s*\"([^\"]+)\"|\"([^\"]+)\"");
 
         for (String rawMethod : touchedMethods) {
@@ -592,7 +592,7 @@ public class ImpactAnalyzer {
                 debug("[DEBUG] extractControllerEndpoints: method declaration not found for " + methodName);
                 continue;
             }
-            
+
             // Find matching closing parenthesis (handles nested parens in annotations)
             int paramStart = dm.end() - 1;
             int depth = 1;
@@ -610,7 +610,7 @@ public class ImpactAnalyzer {
 
             String matchedDecl = dm.group();
             debug("[DEBUG] extractControllerEndpoints: matched declaration snippet: " + matchedDecl.substring(0, Math.min(150, matchedDecl.length())).replaceAll("\\s+", " "));
-            
+
             int publicPos = matchedDecl.indexOf("public");
             if (publicPos == -1) publicPos = matchedDecl.indexOf("protected");
             if (publicPos == -1) publicPos = matchedDecl.indexOf("private");
@@ -649,7 +649,9 @@ public class ImpactAnalyzer {
             debug("[DEBUG] extractControllerEndpoints: annotation block range [" + annoStart + ", " + methodLineIdx + "), lastAnnotationLine=" + lastAnnotationLine);
 
             for (int i = Math.max(0, annoStart); i < methodLineIdx; i++) {
-                if (!methodMapping.matcher(lines[i]).find()) continue;
+                Matcher mm = methodMapping.matcher(lines[i]);
+                if (!mm.find()) continue;
+                String annotationType = mm.group(1);
                 debug("[DEBUG] extractControllerEndpoints: found mapping annotation at line " + (i+1) + ": " + lines[i]);
 
                 StringBuilder annoBuf = new StringBuilder(lines[i]).append(' ');
@@ -671,8 +673,9 @@ public class ImpactAnalyzer {
                 } else {
                     debug("[DEBUG] extractControllerEndpoints: NO PATH MATCH in buffered annotation");
                 }
+                String httpVerb = verbFromAnnotationType(annotationType, annoBuf.toString());
                 String fullPath = (classPrefix + "/" + methodPath).replaceAll("//+", "/");
-                endpoints.add(className + "." + methodName + " [" + fullPath + "]");
+                endpoints.add(className + "." + methodName + " [" + httpVerb + " " + fullPath + "]");
             }
         }
 
@@ -696,12 +699,14 @@ public class ImpactAnalyzer {
             if (className != null && lines[i].contains("class " + className)) break;
         }
 
-        Pattern mappingStart = Pattern.compile("@(?:RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)\\b");
+        Pattern mappingStart = Pattern.compile("@(Request|Get|Post|Put|Delete|Patch)Mapping\\b");
         Pattern methodSignature = Pattern.compile("(?:public|protected|private)\\s+[^{;]+?\\b(\\w+)\\s*\\([^)]*\\)\\s*(?:throws [^{]+)?\\s*\\{");
         Pattern pathPattern = Pattern.compile("(?:value|path)\\s*=\\s*\"([^\"]+)\"|\"([^\"]+)\"");
 
         for (int i = 0; i < lines.length; i++) {
-            if (!mappingStart.matcher(lines[i]).find()) continue;
+            Matcher mappingMatcher = mappingStart.matcher(lines[i]);
+            if (!mappingMatcher.find()) continue;
+            String annotationType = mappingMatcher.group(1);
 
             StringBuilder annoBuf = new StringBuilder(lines[i]).append(' ');
             int j = i + 1;
@@ -718,6 +723,7 @@ public class ImpactAnalyzer {
             if (pm.find()) {
                 methodPath = pm.group(1) != null ? pm.group(1) : pm.group(2);
             }
+            String httpVerb = verbFromAnnotationType(annotationType, annoBuf.toString());
 
             int k = j;
             while (k < lines.length && lines[k].trim().startsWith("@")) {
@@ -740,10 +746,24 @@ public class ImpactAnalyzer {
 
             String fullPath = (classPrefix + "/" + methodPath).replaceAll("//+", "/");
             String effectiveClassName = (className == null || className.isBlank()) ? "Controller" : className;
-            endpoints.add(effectiveClassName + "." + methodName + " [" + fullPath + "]");
+            endpoints.add(effectiveClassName + "." + methodName + " [" + httpVerb + " " + fullPath + "]");
         }
 
         return endpoints.stream().distinct().collect(Collectors.toList());
+    }
+
+    private static String verbFromAnnotationType(String type, String annoBuf) {
+        switch (type) {
+            case "Get":    return "GET";
+            case "Post":   return "POST";
+            case "Put":    return "PUT";
+            case "Delete": return "DELETE";
+            case "Patch":  return "PATCH";
+            case "Request":
+                Matcher m = Pattern.compile("method\\s*=\\s*RequestMethod\\.(GET|POST|PUT|DELETE|PATCH)").matcher(annoBuf);
+                return m.find() ? m.group(1) : "ANY";
+            default: return "GET";
+        }
     }
 
     public static List<String> filterValidMethodNames(Collection<String> methods) {
