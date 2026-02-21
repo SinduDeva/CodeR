@@ -3,6 +3,9 @@ package com.reviewer.core;
 import com.reviewer.analysis.ImpactAnalyzer;
 import com.reviewer.analysis.JavaSymbolIndex;
 import com.reviewer.analysis.RuleEngine;
+import com.reviewer.analysis.AsyncPmdAnalyzer;
+import com.reviewer.cache.CacheManager;
+import com.reviewer.cache.FileChangeDetector;
 import com.reviewer.model.Models.*;
 import com.reviewer.util.ColorConsole;
 import com.reviewer.report.HtmlReportGenerator;
@@ -17,6 +20,7 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.*;
 import java.util.regex.*;
 
@@ -35,10 +39,36 @@ public class ReviewEngine {
     private final Path CACHE_DIR = Paths.get(".code-reviewer-cache");
     private final Path GRAPH_CACHE = CACHE_DIR.resolve("reverse-graph.json");
 
+    // Phase 1: Performance/Caching components
+    private CacheManager cacheManager;
+    private FileChangeDetector fileChangeDetector;
+    private AsyncPmdAnalyzer asyncPmdAnalyzer;
+    private int filesSkipped = 0;
+
     public ReviewEngine(Config config) {
         this.config = config;
         this.repoRoot = resolveRepoRoot();
         initializeBranch();
+        initializePerformanceComponents();
+    }
+
+    private void initializePerformanceComponents() {
+        try {
+            // Initialize cache manager
+            if (config.enableCache) {
+                cacheManager = CacheManager.getInstance(config.cacheDirectory);
+                fileChangeDetector = new FileChangeDetector(cacheManager);
+                debug("[PERF] Cache enabled with directory: " + config.cacheDirectory);
+            }
+
+            // Initialize async PMD analyzer
+            if (config.enableAsyncPmd) {
+                asyncPmdAnalyzer = new AsyncPmdAnalyzer(config.asyncThreadPoolSize, cacheManager);
+                debug("[PERF] Async PMD enabled with thread pool size: " + config.asyncThreadPoolSize);
+            }
+        } catch (Exception e) {
+            System.err.println("[WARN] Failed to initialize performance components: " + e.getMessage());
+        }
     }
 
     private void debug(String message) {
@@ -220,16 +250,43 @@ public class ReviewEngine {
             return null;
         }
 
+        // Phase 1: File filtering to skip unchanged files for PMD analysis
+        List<ChangedFile> filesToAnalyze = changedFiles;
+        if (config.enableFileFiltering && fileChangeDetector != null) {
+            filesToAnalyze = fileChangeDetector.filterUnchangedFiles(changedFiles);
+            filesSkipped = fileChangeDetector.getSkipCount();
+            if (filesSkipped > 0) {
+                debug("[PERF] Skipped " + filesSkipped + " unchanged files from PMD analysis");
+            }
+        }
+
         for (ChangedFile file : changedFiles) {
             reviewFile(file);
         }
+
         // Integration of PMD as an optional enhancement with graceful fallback
         if (config.enablePmdAnalysis) {
             try {
                 System.out.println("[DEBUG] PMD Path: " + config.pmdPath);
                 System.out.println("[DEBUG] PMD Ruleset: " + config.pmdRulesetPath);
-                System.out.println("[DEBUG] Files to analyze: " + changedFiles.size());
-                List<Finding> pmdFindings = com.reviewer.analysis.PmdAnalyzer.analyze(changedFiles, config);
+                System.out.println("[DEBUG] Files to analyze: " + filesToAnalyze.size());
+
+                List<Finding> pmdFindings;
+
+                // Use async analyzer if enabled
+                if (asyncPmdAnalyzer != null && config.enableAsyncPmd) {
+                    try {
+                        pmdFindings = asyncPmdAnalyzer.analyze(filesToAnalyze, config);
+                        debug("[PERF] Async PMD analysis completed");
+                    } catch (Exception e) {
+                        System.err.println("[WARN] Async PMD failed, falling back to sync: " + e.getMessage());
+                        pmdFindings = com.reviewer.analysis.PmdAnalyzer.analyze(filesToAnalyze, config);
+                    }
+                } else {
+                    // Fallback to synchronous analysis
+                    pmdFindings = com.reviewer.analysis.PmdAnalyzer.analyze(filesToAnalyze, config);
+                }
+
                 findings.addAll(pmdFindings);
                 System.out.println(pmdFindings);
             } catch (Exception e) {
@@ -238,16 +295,45 @@ public class ReviewEngine {
         }
 
         testingStatusByFile = generateTestingStatus(changedFiles, testFiles);
-        
+
         ensureSymbolIndex();
         loadOrBuildReverseGraph(changedFiles);
-        
+
         debug("Tree-sitter available: " + com.reviewer.analysis.TreeSitterAnalyzer.isAvailable());
         impactEntries = analyzeImpact(changedFiles);
         enrichImpactEntriesWithTesting();
 
         printReport(changedFiles);
+
+        // Cleanup performance components
+        cleanupPerformanceComponents();
+
         return generateHtmlReport(changedFiles);
+    }
+
+    private void cleanupPerformanceComponents() {
+        try {
+            // Log cache statistics
+            if (cacheManager != null) {
+                CacheManager.CacheStats stats = cacheManager.getStatistics();
+                debug("[PERF] Cache Statistics - Hits: " + stats.hits + ", Misses: " + stats.misses +
+                      ", Hit Rate: " + stats.hitRate + "%, Cached Files: " + stats.totalCachedFiles);
+            }
+
+            // Shutdown async executor
+            if (asyncPmdAnalyzer != null) {
+                asyncPmdAnalyzer.shutdown();
+                debug("[PERF] Async PMD analyzer shut down");
+            }
+
+            // Clean expired cache entries
+            if (cacheManager != null && config.cacheExpirationDays > 0) {
+                long maxAgeMillis = config.cacheExpirationDays * 24 * 60 * 60 * 1000;
+                cacheManager.clearExpiredCache(maxAgeMillis);
+            }
+        } catch (Exception e) {
+            debug("[WARN] Error during cleanup: " + e.getMessage());
+        }
     }
 
     private boolean isTestFile(ChangedFile file) {
@@ -632,13 +718,24 @@ public class ReviewEngine {
         System.out.println(ColorConsole.CYAN + "\n--- Code Review Summary ---" + ColorConsole.RESET);
         System.out.println("Branch: " + currentBranch);
         System.out.println("Staged Files: " + totalStagedFiles);
-        
+
+        // Print performance metrics
+        if (filesSkipped > 0) {
+            System.out.println(ColorConsole.GREEN + "Files Skipped (unchanged): " + filesSkipped + ColorConsole.RESET);
+        }
+
         long mustFix = findings.stream().filter(f -> f.severity == Severity.MUST_FIX).count();
         if (mustFix > 0) {
             System.out.println(ColorConsole.RED + "Critical Issues (MUST FIX): " + mustFix + ColorConsole.RESET);
         }
-        
+
         System.out.println("Java Issues: " + findings.size());
+
+        // Print cache statistics if available
+        if (config.enableCache && cacheManager != null && config.debug) {
+            CacheManager.CacheStats stats = cacheManager.getStatistics();
+            System.out.println("Cache Hit Rate: " + stats.hitRate + "% (" + stats.hits + " hits, " + stats.misses + " misses)");
+        }
     }
 
     private static class LineRange {

@@ -11,17 +11,24 @@ public class PmdAnalyzer {
 
     public static List<Finding> analyze(List<ChangedFile> files, Config config) {
         List<Finding> allFindings = new ArrayList<>();
-        System.out.println("PMD Anlayser");
+        System.out.println("PMD Analyzer");
         System.out.println("flag"+config.enablePmdAnalysis);
        if (!config.enablePmdAnalysis) return allFindings;
 
+        for (ChangedFile file : files) {
+            allFindings.addAll(analyzeSingleFile(file, config));
+        }
+        return allFindings;
+    }
+
+    public static List<Finding> analyzeSingleFile(ChangedFile file, Config config) {
+        List<Finding> findings = new ArrayList<>();
+        if (!config.enablePmdAnalysis) return findings;
+
         try {
-            // Create a temporary file list for PMD
+            // Create a temporary file list for PMD with single file
             Path tempFileList = Files.createTempFile("pmd-files", ".txt");
-            List<String> filePaths = files.stream()
-                .map(f -> f.path)
-                .collect(java.util.stream.Collectors.toList());
-            Files.write(tempFileList, filePaths);
+            Files.write(tempFileList, file.path.getBytes());
 
             // Execute PMD CLI
             // Command: pmd check -f json -R <ruleset> -filelist <tempFile>
@@ -49,20 +56,19 @@ public class PmdAnalyzer {
             // PMD exit codes: 0 = no violations, 4 = violations found, others = error
             if (!finished) {
                 process.destroy();
-                System.err.println("PMD analysis timed out after 60 seconds");
-                return allFindings;
+                System.err.println("PMD analysis timed out after 60 seconds for file: " + file.path);
+                return findings;
             }
-            System.out.println("exit code: "+process.exitValue());
 
-            allFindings.addAll(parsePmdJson(output.toString(), files));
+            findings.addAll(parsePmdJson(output.toString(), java.util.Arrays.asList(file)));
             Files.deleteIfExists(tempFileList);
 
         } catch (Exception e) {
-            System.err.println("PMD integration failed: " + e.getMessage());
+            System.err.println("PMD integration failed for file " + file.path + ": " + e.getMessage());
             // Fallback: Return empty findings, existing RuleEngine will still run
         }
 
-        return allFindings;
+        return findings;
     }
 
     private static List<Finding> parsePmdJson(String json, List<ChangedFile> changedFiles) {

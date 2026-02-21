@@ -122,6 +122,14 @@ public class Main {
         config.enableStructuralImpact = Boolean.parseBoolean(props.getProperty("enable.structural.impact", String.valueOf(config.enableStructuralImpact)));
         config.pmdPath = props.getProperty("pmd.path", config.pmdPath);
         config.pmdRulesetPath = props.getProperty("pmd.ruleset.path", config.pmdRulesetPath);
+
+        // Phase 1: Performance/Caching Configuration
+        config.enableCache = Boolean.parseBoolean(props.getProperty("enable.cache", String.valueOf(config.enableCache)));
+        config.enableFileFiltering = Boolean.parseBoolean(props.getProperty("enable.file.filtering", String.valueOf(config.enableFileFiltering)));
+        config.enableAsyncPmd = Boolean.parseBoolean(props.getProperty("enable.async.pmd", String.valueOf(config.enableAsyncPmd)));
+        config.asyncThreadPoolSize = Integer.parseInt(props.getProperty("async.thread.pool.size", String.valueOf(config.asyncThreadPoolSize)));
+        config.cacheExpirationDays = Long.parseLong(props.getProperty("cache.expiration.days", String.valueOf(config.cacheExpirationDays)));
+        config.cacheDirectory = props.getProperty("cache.directory", config.cacheDirectory);
     }
 
     private static void openReport(String reportPath) {

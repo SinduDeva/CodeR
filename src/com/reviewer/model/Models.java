@@ -161,5 +161,13 @@ public class Models {
         public boolean enableStructuralImpact = true;
         public String pmdPath = "pmd";
         public String pmdRulesetPath = "config/pmd/changelens-ruleset.xml";
+
+        // Phase 1: Performance/Caching Configuration
+        public boolean enableCache = true;
+        public boolean enableFileFiltering = true;
+        public boolean enableAsyncPmd = true;
+        public int asyncThreadPoolSize = 4;
+        public long cacheExpirationDays = 7;
+        public String cacheDirectory = ".code-reviewer-cache";
     }
 }
