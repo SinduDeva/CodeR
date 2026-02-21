@@ -5,6 +5,79 @@ import java.util.regex.*;
 import java.util.*;
 
 public class RuleEngine {
+
+    // -----------------------------------------------------------------------
+    // Static pattern cache — compiled once per JVM instead of once per file
+    // -----------------------------------------------------------------------
+    // reviewBugPatterns
+    private static final Pattern P_RESOURCE_OPEN   = Pattern.compile("(?:InputStream|OutputStream|Reader|Writer|Connection|Statement|ResultSet|Socket)\\s+(\\w+)\\s*=\\s*(?:new|[^;]+?\\.get\\w+)\\(", Pattern.MULTILINE);
+    private static final Pattern P_BIGDECIMAL_EQ   = Pattern.compile("(\\w+)\\.equals\\((\\w+)\\)");
+    private static final Pattern P_BIGDECIMAL_CTOR = Pattern.compile("new\\s+BigDecimal\\(\\s*(\\d+(?:\\.\\d+)?)\\s*\\)");
+    private static final Pattern P_OPTIONAL_NULL   = Pattern.compile("Optional<[^>]+>\\s+\\w+\\s*\\(.*?\\)\\s*\\{[^}]*return\\s+null;", Pattern.DOTALL);
+    private static final Pattern P_FOREACH_COLL    = Pattern.compile("for\\s*\\(.*?:\\s*(\\w+)\\s*\\)");
+    private static final Pattern P_NEW_STREAM      = Pattern.compile("new\\s+(FileInputStream|FileOutputStream|FileReader|FileWriter|BufferedReader|BufferedWriter|InputStreamReader|OutputStreamWriter|Scanner|PrintWriter|ZipInputStream|ZipOutputStream)\\s*\\(");
+    // reviewNullSafety
+    private static final Pattern P_OPTIONAL_OF     = Pattern.compile("Optional\\.of\\(([^)]+)\\)");
+    private static final Pattern P_CHAINED_DEREF   = Pattern.compile("\\w+\\.\\w+\\(\\)\\.\\w+\\(");
+    private static final Pattern P_LIST_GET        = Pattern.compile("\\.get\\((\\d+)\\)");
+    private static final Pattern P_OPT_GET         = Pattern.compile("Optional\\s*<[^>]*>.*?\\.get\\(\\)", Pattern.DOTALL);
+    // reviewExceptionHandling
+    private static final Pattern P_EMPTY_CATCH     = Pattern.compile("catch\\s*\\(\\s*(\\w+)\\s+(\\w+)\\s*\\)\\s*\\{\\s*\\}");
+    private static final Pattern P_CATCH_THROWABLE = Pattern.compile("catch\\s*\\(\\s*Throwable\\s+\\w+\\s*\\)");
+    private static final Pattern P_CATCH_EXCEPTION = Pattern.compile("catch\\s*\\(\\s*Exception\\s+\\w+\\s*\\)");
+    private static final Pattern P_CATCH_INTERRUPT = Pattern.compile("catch\\s*\\(\\s*InterruptedException\\s+\\w+\\s*\\)");
+    // reviewLogging
+    private static final Pattern P_LOG_SENSITIVE   = Pattern.compile("log\\.(info|debug|error|warn)\\(\".*?(password|secret|token|apiKey|ssn).*?\"\\)", Pattern.CASE_INSENSITIVE);
+    private static final Pattern P_LOG_IN_LOOP     = Pattern.compile("for\\s*\\(.*\\)\\s*\\{[^}]{0,200}?log\\.(info|debug|error|warn)\\(", Pattern.DOTALL);
+    private static final Pattern P_SYS_OUT         = Pattern.compile("System\\.(out|err)\\.print");
+    private static final Pattern P_LOG_CALLS       = Pattern.compile("log\\.(info|debug|error|warn)\\((.*?)\\);", Pattern.DOTALL);
+    // reviewSpringBoot
+    private static final Pattern P_TX_PRIVATE      = Pattern.compile("@Transactional[^;{}]*private\\s+\\w+\\s+\\w+", Pattern.DOTALL);
+    private static final Pattern P_REQUEST_BODY    = Pattern.compile("@RequestBody");
+    private static final Pattern P_FIELD_INJECT    = Pattern.compile("@Autowired\\s+private\\s+\\w+");
+    private static final Pattern P_HARDCODED_URL   = Pattern.compile("\"https?://[^\"]+\"");
+    private static final Pattern P_REPO_FIND       = Pattern.compile("for\\s*\\(.*\\)\\s*\\{[^}]{0,200}?\\.find(All|By|One)\\(", Pattern.DOTALL);
+    private static final Pattern P_SCHED_FIXED     = Pattern.compile("@Scheduled\\([^)]*(fixedRate|fixedDelay)\\s*=\\s*(\\d+)");
+    private static final Pattern P_CROSS_WILD      = Pattern.compile("@CrossOrigin\\s*\\([^)]*(?:origins|value)\\s*=\\s*(?:\"\\*\"|\\{\\s*\"\\*\"\\s*\\})");
+    private static final Pattern P_CROSS_BARE      = Pattern.compile("@CrossOrigin\\s*(?:(?=\\n|\\r|\\s*$)|(?=\\s+[^(]))");
+    private static final Pattern P_ASYNC_PRIVATE   = Pattern.compile("@Async[^;{}\\n]*\\n(?:\\s*@[^\\n]*\\n)*\\s*private\\s+\\w+\\s+\\w+\\s*\\(", Pattern.DOTALL);
+    private static final Pattern P_LIFECYCLE_STAT  = Pattern.compile("@(?:PostConstruct|PreDestroy)[^;{}\\n]*\\n(?:\\s*@[^\\n]*\\n)*\\s*(?:public|protected|private)\\s+static\\s+", Pattern.DOTALL);
+    private static final Pattern P_RESP_WILDCARD   = Pattern.compile("ResponseEntity<\\?>\\s+\\w+\\s*\\(");
+    private static final Pattern P_SENSITIVE_FIELD = Pattern.compile("(?:private|protected)\\s+(?:String|char\\[\\])\\s+(password|secret|token|apiKey|apiSecret|creditCard|cvv|ssn)\\b");
+    private static final Pattern P_SELF_INVOKE     = Pattern.compile("\\bthis\\.(\\w+)\\s*\\(");
+    private static final Pattern P_CACHE_PRIVATE   = Pattern.compile("@Cacheable[^;{}\\n]*\\n(?:\\s*@[^\\n]*\\n)*\\s*private\\s+\\w+\\s+\\w+\\s*\\(", Pattern.DOTALL);
+    private static final Pattern P_CACHEABLE       = Pattern.compile("@Cacheable\\(([^)]*)\\)");
+    private static final Pattern P_REST_TPL_NEW    = Pattern.compile("new\\s+RestTemplate\\s*\\(");
+    private static final Pattern P_VALUE_NO_DEF    = Pattern.compile("@Value\\(\\\"\\$\\{([^:}]+)\\}\\\"\\)");
+    private static final Pattern P_VALUE_SECRET    = Pattern.compile("@Value\\(\\\"\\$\\{[^}]*?(password|secret|token)[^}]*\\}\\\"\\)", Pattern.CASE_INSENSITIVE);
+    // reviewPerformance
+    private static final Pattern P_OR_ELSE         = Pattern.compile("\\.orElse\\s*\\(\\s*(\\w+\\(.*?\\))\\s*\\)");
+    private static final Pattern P_CONCAT_LOOP     = Pattern.compile("for\\s*\\(.*\\)\\s*\\{[^}]{0,200}?\\+=\\s*\"", Pattern.DOTALL);
+    private static final Pattern P_THREAD_SLEEP    = Pattern.compile("Thread\\.sleep\\(\\s*\\d+\\s*\\)");
+    private static final Pattern P_SLEEP_LITERAL   = Pattern.compile("Thread\\.sleep\\(\\s*(\\d+)\\s*\\)");
+    // reviewCodeQuality
+    private static final Pattern P_BOXED_CMP       = Pattern.compile("\\b(Integer|Long|Boolean)\\b.*?==.*?");
+    private static final Pattern P_HARDCODED_CRED  = Pattern.compile("\"(?i)(password|passwd|secretKey|apiKey|token)=.+\"");
+    private static final Pattern P_TODO_FIXME      = Pattern.compile("//\\s*(TODO|FIXME)");
+    private static final Pattern P_WHILE_TRUE      = Pattern.compile("while\\s*\\(\\s*true\\s*\\)\\s*\\{");
+    private static final Pattern P_DEEP_NESTING    = Pattern.compile("(?:if|for|while)\\s*\\(.*?\\)\\s*\\{\\s*(?:[^{}]*\\{[^{}]*\\}){3,}", Pattern.DOTALL);
+    private static final Pattern P_SIMPLE_LITERAL  = Pattern.compile("\"([A-Za-z0-9_-]{2,})\"");
+    private static final Pattern P_NUMBER_LITERAL  = Pattern.compile("(?<!\")\\b(\\d{2,})\\b(?!\")");
+    private static final Pattern P_DOMAIN_LITERAL  = Pattern.compile("\"([A-Z][A-Z0-9_]{1,})\"");
+    private static final Pattern P_LIT_EQUALS      = Pattern.compile("([A-Za-z0-9_\\.\\(\\)]+)\\.(equals(?:IgnoreCase)?)\\(\\s*\"([^\"]+)\"\\s*\\)");
+    private static final Pattern P_LITERAL_CONST   = Pattern.compile("\"([A-Z0-9_]{3,})\"");
+    private static final Pattern P_STRING_EQ       = Pattern.compile("(\\w+)\\s*(==|!=)\\s*(\"[^\"]*\")|(\"[^\"]*\")\\s*(==|!=)\\s*(\\w+)");
+    // reviewJavaModern
+    private static final Pattern P_LEGACY_DATE     = Pattern.compile("(?:new\\s+(?:java\\.util\\.)?(?:Date|GregorianCalendar)\\s*\\(|Calendar\\.getInstance\\s*\\(|new\\s+SimpleDateFormat\\s*\\()");
+    private static final Pattern P_RAW_COLL        = Pattern.compile("new\\s+(ArrayList|HashMap|HashSet|LinkedList|TreeMap|TreeSet|LinkedHashMap|LinkedHashSet|PriorityQueue|ArrayDeque)\\s*(?!\\s*<)\\s*\\(");
+    private static final Pattern P_EMPTY_COLLS     = Pattern.compile("Collections\\.(EMPTY_LIST|EMPTY_SET|EMPTY_MAP)\\b");
+    private static final Pattern P_DOUBLE_BRACE    = Pattern.compile("new\\s+\\w+(?:<[^>]*>)?\\s*\\(\\s*\\)\\s*\\{\\s*\\{");
+    private static final Pattern P_MATH_RANDOM     = Pattern.compile("Math\\.random\\(\\)");
+    private static final Pattern P_INSTANCEOF_CAST = Pattern.compile("instanceof\\s+(\\w+)\\b[^;{]*\\n[^;{]*\\(\\s*\\1\\s*\\)");
+    // reviewOpenApi
+    private static final Pattern P_MAPPING_ANNO    = Pattern.compile("@(?:GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping)\\b");
+    private static final Pattern P_METHOD_PARAM    = Pattern.compile("(?:@RequestParam|@PathVariable|@RequestHeader)\\s+(?:[\\w<>\\[\\]]+)\\s+(\\w+)");
+
     public static void runRules(String content, String[] lines, ChangedFile file, List<Finding> findings, Config config) {
         List<Range> methodRanges = findMethodRanges(lines);
         AnalysisContext context = new AnalysisContext();
@@ -109,10 +182,9 @@ public class RuleEngine {
         return -1;
     }
 
-    private static List<LogCall> findLogCalls(String content) {
+    private static List<LogCall> findLogCallsCached(String content) {
         List<LogCall> calls = new ArrayList<>();
-        Pattern p = Pattern.compile("log\\.(info|debug|error|warn)\\((.*?)\\);", Pattern.DOTALL);
-        Matcher m = p.matcher(content);
+        Matcher m = P_LOG_CALLS.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             String level = m.group(1);
@@ -198,10 +270,7 @@ public class RuleEngine {
     }
 
     private static void reviewBugPatterns(String content, String[] lines, ChangedFile file, List<Finding> findings, AnalysisContext context) {
-        // Multi-line: Resource created without try-with-resources (e.g. InputStream, Connection)
-        // Heuristic: check if new resource is created but no .close() or try-with-resources is nearby
-        Pattern resourceOpen = Pattern.compile("(?:InputStream|OutputStream|Reader|Writer|Connection|Statement|ResultSet|Socket)\\s+(\\w+)\\s*=\\s*(?:new|[^;]+?\\.get\\w+)\\(", Pattern.MULTILINE);
-        Matcher m = resourceOpen.matcher(content);
+        Matcher m = P_RESOURCE_OPEN.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -230,8 +299,7 @@ public class RuleEngine {
         }
 
         // BigDecimal equality using equals() is scale-sensitive (1.0 != 1.00)
-        Pattern bigDecimalEquals = Pattern.compile("(\\w+)\\.equals\\((\\w+)\\)");
-        m = bigDecimalEquals.matcher(content);
+        m = P_BIGDECIMAL_EQ.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -249,8 +317,7 @@ public class RuleEngine {
         }
 
         // BigDecimal constructed from numeric literal is scale-sensitive and can lose intent
-        Pattern bigDecimalCtorNumeric = Pattern.compile("new\\s+BigDecimal\\(\\s*(\\d+(?:\\.\\d+)?)\\s*\\)");
-        m = bigDecimalCtorNumeric.matcher(content);
+        m = P_BIGDECIMAL_CTOR.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -263,8 +330,7 @@ public class RuleEngine {
         }
 
         // Optional-returning methods should not return null
-        Pattern optionalReturnNull = Pattern.compile("Optional<[^>]+>\\s+\\w+\\s*\\(.*?\\)\\s*\\{[^}]*return\\s+null;", Pattern.DOTALL);
-        m = optionalReturnNull.matcher(content);
+        m = P_OPTIONAL_NULL.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -275,8 +341,7 @@ public class RuleEngine {
         }
 
         // Modifying collection during foreach (ConcurrentModification risk)
-        Pattern forEachCollection = Pattern.compile("for\\s*\\(.*?:\\s*(\\w+)\\s*\\)");
-        m = forEachCollection.matcher(content);
+        m = P_FOREACH_COLL.matcher(content);
         while (m.find()) {
             String coll = m.group(1);
             int line = getLineNumber(content, m.start());
@@ -292,8 +357,7 @@ public class RuleEngine {
         }
 
         // Resource leak detection (try-with-resources)
-        Pattern newStream = Pattern.compile("new\\s+(FileInputStream|FileOutputStream|FileReader|FileWriter|BufferedReader|BufferedWriter|InputStreamReader|OutputStreamWriter|Scanner|PrintWriter|ZipInputStream|ZipOutputStream)\\s*\\(");
-        m = newStream.matcher(content);
+        m = P_NEW_STREAM.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -314,8 +378,7 @@ public class RuleEngine {
 
     private static void reviewNullSafety(String content, String[] lines, ChangedFile file, List<Finding> findings, AnalysisContext context) {
         // Optional.of can throw NPE
-        Pattern p = Pattern.compile("Optional\\.of\\(([^)]+)\\)");
-        Matcher m = p.matcher(content);
+        Matcher m = P_OPTIONAL_OF.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -330,8 +393,7 @@ public class RuleEngine {
         }
 
         // Chained dereference a.b().c() risk (simple heuristic)
-        Pattern chained = Pattern.compile("\\w+\\.\\w+\\(\\)\\.\\w+\\(");
-        m = chained.matcher(content);
+        m = P_CHAINED_DEREF.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -342,8 +404,7 @@ public class RuleEngine {
         }
 
         // List get without bounds check
-        Pattern listGet = Pattern.compile("\\.get\\((\\d+)\\)");
-        m = listGet.matcher(content);
+        m = P_LIST_GET.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -355,8 +416,7 @@ public class RuleEngine {
         }
 
         // Optional.get without presence check
-        Pattern optGetCall = Pattern.compile("Optional\\s*<[^>]*>.*?\\.get\\(\\)", Pattern.DOTALL);
-        m = optGetCall.matcher(content);
+        m = P_OPT_GET.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -374,8 +434,7 @@ public class RuleEngine {
 
     private static void reviewExceptionHandling(String content, String[] lines, ChangedFile file, List<Finding> findings, AnalysisContext context) {
         // Empty catch blocks
-        Pattern emptyCatch = Pattern.compile("catch\\s*\\(\\s*(\\w+)\\s+(\\w+)\\s*\\)\\s*\\{\\s*\\}");
-        Matcher m = emptyCatch.matcher(content);
+        Matcher m = P_EMPTY_CATCH.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -386,8 +445,7 @@ public class RuleEngine {
         }
 
         // Catching Throwable
-        Pattern catchThrowable = Pattern.compile("catch\\s*\\(\\s*Throwable\\s+\\w+\\s*\\)");
-        m = catchThrowable.matcher(content);
+        m = P_CATCH_THROWABLE.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -398,8 +456,7 @@ public class RuleEngine {
         }
 
         // Catching generic Exception
-        Pattern catchException = Pattern.compile("catch\\s*\\(\\s*Exception\\s+\\w+\\s*\\)");
-        m = catchException.matcher(content);
+        m = P_CATCH_EXCEPTION.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -410,8 +467,7 @@ public class RuleEngine {
         }
 
         // Swallowed interrupt
-        Pattern catchInterrupt = Pattern.compile("catch\\s*\\(\\s*InterruptedException\\s+\\w+\\s*\\)");
-        m = catchInterrupt.matcher(content);
+        m = P_CATCH_INTERRUPT.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -432,8 +488,7 @@ public class RuleEngine {
         Set<Integer> loggingScope = buildLoggingScope(file, lines, methodRanges);
 
         // Sensitive data in logs
-        Pattern sensitive = Pattern.compile("log\\.(info|debug|error|warn)\\(\".*?(password|secret|token|apiKey|ssn).*?\"\\)", Pattern.CASE_INSENSITIVE);
-        Matcher m = sensitive.matcher(content);
+        Matcher m = P_LOG_SENSITIVE.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!loggingScope.contains(line)) continue;
@@ -444,8 +499,7 @@ public class RuleEngine {
         }
 
         // Logging inside loops
-        Pattern logInLoop = Pattern.compile("for\\s*\\(.*\\)\\s*\\{[^}]{0,200}?log\\.(info|debug|error|warn)\\(", Pattern.DOTALL);
-        m = logInLoop.matcher(content);
+        m = P_LOG_IN_LOOP.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!loggingScope.contains(line)) continue;
@@ -456,8 +510,7 @@ public class RuleEngine {
         }
 
         // System.out/err usage
-        Pattern sysOut = Pattern.compile("System\\.(out|err)\\.print");
-        m = sysOut.matcher(content);
+        m = P_SYS_OUT.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!loggingScope.contains(line)) continue;
@@ -467,7 +520,7 @@ public class RuleEngine {
                 "private static final Logger log = LoggerFactory.getLogger(ThisClass.class);\n// ...\nlog.info(\"Message\");"));
         }
 
-        List<LogCall> logCalls = findLogCalls(content);
+        List<LogCall> logCalls = findLogCallsCached(content);
 
         // Placeholder mismatch
         for (LogCall call : logCalls) {
@@ -549,8 +602,7 @@ public class RuleEngine {
 
     private static void reviewSpringBoot(String content, String[] lines, ChangedFile file, List<Finding> findings, AnalysisContext context, Config config) {
         // Transactional on private method
-        Pattern txPrivate = Pattern.compile("@Transactional[^;{}]*private\\s+\\w+\\s+\\w+", Pattern.DOTALL);
-        Matcher m = txPrivate.matcher(content);
+        Matcher m = P_TX_PRIVATE.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -564,8 +616,7 @@ public class RuleEngine {
         Severity springSeverity = context.isController || context.isService ? Severity.MUST_FIX : Severity.SHOULD_FIX;
 
         // @RequestBody without @Valid
-        Pattern requestBody = Pattern.compile("@RequestBody");
-        m = requestBody.matcher(content);
+        m = P_REQUEST_BODY.matcher(content);
         while (m.find()) {
             int start = m.start();
             // Look behind for @Valid (approximate scan in preceding chars)
@@ -586,8 +637,7 @@ public class RuleEngine {
         }
 
         // Field injection
-        Pattern fieldInjection = Pattern.compile("@Autowired\\s+private\\s+\\w+");
-        m = fieldInjection.matcher(content);
+        m = P_FIELD_INJECT.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -598,8 +648,7 @@ public class RuleEngine {
         }
 
         // Hardcoded URLs
-        Pattern hardcodedUrl = Pattern.compile("\"https?://[^\"]+\"");
-        m = hardcodedUrl.matcher(content);
+        m = P_HARDCODED_URL.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -610,8 +659,7 @@ public class RuleEngine {
         }
 
         // N+1 query heuristic: repository.find* inside loop
-        Pattern repoFind = Pattern.compile("for\\s*\\(.*\\)\\s*\\{[^}]{0,200}?\\.find(All|By|One)\\(", Pattern.DOTALL);
-        m = repoFind.matcher(content);
+        m = P_REPO_FIND.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -633,8 +681,7 @@ public class RuleEngine {
         }
 
         // @Value without default
-        Pattern valueNoDefault = Pattern.compile("@Value\\(\\\"\\$\\{([^:}]+)\\}\\\"\\)");
-        m = valueNoDefault.matcher(content);
+        m = P_VALUE_NO_DEF.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -645,8 +692,7 @@ public class RuleEngine {
         }
 
         // @Value potential secrets
-        Pattern valueSecret = Pattern.compile("@Value\\(\\\"\\$\\{[^}]*?(password|secret|token)[^}]*\\}\\\"\\)", Pattern.CASE_INSENSITIVE);
-        m = valueSecret.matcher(content);
+        m = P_VALUE_SECRET.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -657,8 +703,7 @@ public class RuleEngine {
         }
 
         // @Cacheable without explicit key
-        Pattern cacheable = Pattern.compile("@Cacheable\\(([^)]*)\\)");
-        m = cacheable.matcher(content);
+        m = P_CACHEABLE.matcher(content);
         while (m.find()) {
             String body = m.group(1);
             int line = getLineNumber(content, m.start());
@@ -672,8 +717,7 @@ public class RuleEngine {
         }
 
         // RestTemplate constructed inline
-        Pattern restTemplateNew = Pattern.compile("new\\s+RestTemplate\\s*\\(");
-        m = restTemplateNew.matcher(content);
+        m = P_REST_TPL_NEW.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -684,8 +728,7 @@ public class RuleEngine {
         }
 
         // @Scheduled with numeric fixedRate/fixedDelay
-        Pattern scheduledFixed = Pattern.compile("@Scheduled\\([^)]*(fixedRate|fixedDelay)\\s*=\\s*(\\d+)");
-        m = scheduledFixed.matcher(content);
+        m = P_SCHED_FIXED.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -697,8 +740,7 @@ public class RuleEngine {
 
         // @CrossOrigin without restricted origins (security risk)
         // Flag: @CrossOrigin with wildcard, OR @CrossOrigin with no origins arg (defaults differ by Spring version)
-        Pattern crossOriginWild = Pattern.compile("@CrossOrigin\\s*\\([^)]*(?:origins|value)\\s*=\\s*(?:\"\\*\"|\\{\\s*\"\\*\"\\s*\\})");
-        m = crossOriginWild.matcher(content);
+        m = P_CROSS_WILD.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -708,8 +750,7 @@ public class RuleEngine {
                 "@CrossOrigin(origins = \"https://your-app.example.com\")"));
         }
         // Also warn on bare @CrossOrigin (no args) which allows all in many Spring versions
-        Pattern crossOriginBare = Pattern.compile("@CrossOrigin\\s*(?:(?=\\n|\\r|\\s*$)|(?=\\s+[^(]))");
-        m = crossOriginBare.matcher(content);
+        m = P_CROSS_BARE.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -724,8 +765,7 @@ public class RuleEngine {
         }
 
         // @Async on private method (AOP proxy can't intercept it, so @Async is silently ignored)
-        Pattern asyncPrivate = Pattern.compile("@Async[^;{}\\n]*\\n(?:\\s*@[^\\n]*\\n)*\\s*private\\s+\\w+\\s+\\w+\\s*\\(", Pattern.DOTALL);
-        m = asyncPrivate.matcher(content);
+        m = P_ASYNC_PRIVATE.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -736,8 +776,7 @@ public class RuleEngine {
         }
 
         // @PostConstruct / @PreDestroy on static method (Spring ignores them on static methods)
-        Pattern lifecycleStatic = Pattern.compile("@(?:PostConstruct|PreDestroy)[^;{}\\n]*\\n(?:\\s*@[^\\n]*\\n)*\\s*(?:public|protected|private)\\s+static\\s+", Pattern.DOTALL);
-        m = lifecycleStatic.matcher(content);
+        m = P_LIFECYCLE_STAT.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -763,8 +802,7 @@ public class RuleEngine {
         }
 
         // ResponseEntity<?> wildcard (loses type safety)
-        Pattern responseWildcard = Pattern.compile("ResponseEntity<\\?>\\s+\\w+\\s*\\(");
-        m = responseWildcard.matcher(content);
+        m = P_RESP_WILDCARD.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -777,8 +815,7 @@ public class RuleEngine {
 
         // Sensitive fields in @Entity without @JsonIgnore (data exposure risk)
         if (context.isEntity) {
-            Pattern sensitiveField = Pattern.compile("(?:private|protected)\\s+(?:String|char\\[\\])\\s+(password|secret|token|apiKey|apiSecret|creditCard|cvv|ssn)\\b");
-            m = sensitiveField.matcher(content);
+            m = P_SENSITIVE_FIELD.matcher(content);
             while (m.find()) {
                 int line = getLineNumber(content, m.start());
                 if (!isInChangedLines(file, line)) continue;
@@ -800,8 +837,7 @@ public class RuleEngine {
         }
 
         // @Transactional self-invocation: this.transactionalMethod() bypasses the Spring AOP proxy
-        Pattern selfInvoke = Pattern.compile("\\bthis\\.(\\w+)\\s*\\(");
-        m = selfInvoke.matcher(content);
+        m = P_SELF_INVOKE.matcher(content);
         while (m.find()) {
             String calledMethod = m.group(1);
             int line = getLineNumber(content, m.start());
@@ -817,8 +853,7 @@ public class RuleEngine {
         }
 
         // @Cacheable on private method (AOP proxy cannot intercept it)
-        Pattern cacheablePrivate = Pattern.compile("@Cacheable[^;{}\\n]*\\n(?:\\s*@[^\\n]*\\n)*\\s*private\\s+\\w+\\s+\\w+\\s*\\(", Pattern.DOTALL);
-        m = cacheablePrivate.matcher(content);
+        m = P_CACHE_PRIVATE.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -857,8 +892,7 @@ public class RuleEngine {
         }
 
         // Rule 2: Mapping annotation without @Operation (undocumented endpoint)
-        Pattern mappingAnno = Pattern.compile("@(?:GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping)\\b");
-        Matcher m = mappingAnno.matcher(content);
+        Matcher m = P_MAPPING_ANNO.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -892,8 +926,7 @@ public class RuleEngine {
         }
 
         // Rule 4: Method parameter with complex object type in controller but no @Parameter or @Schema
-        Pattern methodParam = Pattern.compile("(?:@RequestParam|@PathVariable|@RequestHeader)\\s+(?:[\\w<>\\[\\]]+)\\s+(\\w+)");
-        m = methodParam.matcher(content);
+        m = P_METHOD_PARAM.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -910,8 +943,7 @@ public class RuleEngine {
 
     private static void reviewPerformance(String content, String[] lines, ChangedFile file, List<Finding> findings, AnalysisContext context) {
         // orElse(expensiveCall())
-        Pattern orElse = Pattern.compile("\\.orElse\\s*\\(\\s*(\\w+\\(.*?\\))\\s*\\)");
-        Matcher m = orElse.matcher(content);
+        Matcher m = P_OR_ELSE.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -925,8 +957,7 @@ public class RuleEngine {
         }
 
         // String concatenation in loops
-        Pattern concatInLoop = Pattern.compile("for\\s*\\(.*\\)\\s*\\{[^}]{0,200}?\\+=\\s*\"", Pattern.DOTALL);
-        m = concatInLoop.matcher(content);
+        m = P_CONCAT_LOOP.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -937,8 +968,7 @@ public class RuleEngine {
         }
 
         // Thread.sleep in production code
-        Pattern threadSleep = Pattern.compile("Thread\\.sleep\\(\\s*\\d+\\s*\\)");
-        m = threadSleep.matcher(content);
+        m = P_THREAD_SLEEP.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -951,8 +981,7 @@ public class RuleEngine {
 
     private static void reviewCodeQuality(String content, String[] lines, ChangedFile file, List<Finding> findings, AnalysisContext context, Config config) {
         // Boxed types compared with ==
-        Pattern boxed = Pattern.compile("\\b(Integer|Long|Boolean)\\b.*?==.*?");
-        Matcher m = boxed.matcher(content);
+        Matcher m = P_BOXED_CMP.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -963,8 +992,7 @@ public class RuleEngine {
         }
 
         // Hardcoded credentials
-        Pattern creds = Pattern.compile("\"(?i)(password|passwd|secretKey|apiKey|token)=.+\"");
-        m = creds.matcher(content);
+        m = P_HARDCODED_CRED.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -975,8 +1003,7 @@ public class RuleEngine {
         }
 
         // TODO/FIXME markers
-        Pattern todo = Pattern.compile("//\\s*(TODO|FIXME)");
-        m = todo.matcher(content);
+        m = P_TODO_FIXME.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -1006,8 +1033,7 @@ public class RuleEngine {
         }
 
         // Thread.sleep sanity: suspicious very low or very high literals
-        Pattern sleepLiteral = Pattern.compile("Thread\\.sleep\\(\\s*(\\d+)\\s*\\)");
-        m = sleepLiteral.matcher(content);
+        m = P_SLEEP_LITERAL.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -1032,8 +1058,7 @@ public class RuleEngine {
         }
 
         // Hardcoded string literals (heuristic)
-        Pattern simpleLiteral = Pattern.compile("\"([A-Za-z0-9_-]{2,})\"");
-        m = simpleLiteral.matcher(content);
+        m = P_SIMPLE_LITERAL.matcher(content);
         Set<String> seenLiteralsOnLine = new HashSet<>();
         while (m.find()) {
             int line = getLineNumber(content, m.start());
@@ -1057,8 +1082,7 @@ public class RuleEngine {
         }
 
         // Hardcoded numeric literals (non-string) with length >= 2
-        Pattern numberLiteral = Pattern.compile("(?<!\")\\b(\\d{2,})\\b(?!\")");
-        m = numberLiteral.matcher(content);
+        m = P_NUMBER_LITERAL.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -1071,8 +1095,7 @@ public class RuleEngine {
         }
 
         // Uppercase literals repeated -> promote to constants/enums
-        Pattern domainLiteral = Pattern.compile("\"([A-Z][A-Z0-9_]{1,})\"");
-        m = domainLiteral.matcher(content);
+        m = P_DOMAIN_LITERAL.matcher(content);
         Map<String, List<Integer>> literalOccurrences = new HashMap<>();
         while (m.find()) {
             literalOccurrences.computeIfAbsent(m.group(1), k -> new ArrayList<>()).add(getLineNumber(content, m.start()));
@@ -1090,8 +1113,7 @@ public class RuleEngine {
         }
 
         // Literal equals on possibly null receiver with constant suggestion
-        Pattern literalEquals = Pattern.compile("([A-Za-z0-9_\\.\\(\\)]+)\\.(equals(?:IgnoreCase)?)\\(\\s*\"([^\"]+)\"\\s*\\)");
-        m = literalEquals.matcher(content);
+        m = P_LIT_EQUALS.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -1123,8 +1145,7 @@ public class RuleEngine {
         }
 
         // Potential infinite while(true) without exit markers
-        Pattern whileTrue = Pattern.compile("while\\s*\\(\\s*true\\s*\\)\\s*\\{");
-        m = whileTrue.matcher(content);
+        m = P_WHILE_TRUE.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -1142,8 +1163,7 @@ public class RuleEngine {
         // Resource leak detection (already handled by reviewBugPatterns)
 
         // Multi-line: Deep nesting detection (heuristic)
-        Pattern deepNesting = Pattern.compile("(?:if|for|while)\\s*\\(.*?\\)\\s*\\{\\s*(?:[^{}]*\\{[^{}]*\\}){3,}", Pattern.DOTALL);
-        m = deepNesting.matcher(content);
+        m = P_DEEP_NESTING.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -1154,8 +1174,7 @@ public class RuleEngine {
         }
 
         // Actionable recommendation: Suggested constant name (combined for same line)
-        Pattern literalConst = Pattern.compile("\"([A-Z0-9_]{3,})\"");
-        m = literalConst.matcher(content);
+        m = P_LITERAL_CONST.matcher(content);
         Map<Integer, List<String>> tokensByLine = new HashMap<>();
         while (m.find()) {
             int line = getLineNumber(content, m.start());
@@ -1198,8 +1217,7 @@ public class RuleEngine {
         if (config.strictJava) {
             // String comparison using == or !=
             // Capture groups: 1=var, 2=op, 3=lit OR 4=lit, 5=op, 6=var
-            Pattern stringEq = Pattern.compile("(\\w+)\\s*(==|!=)\\s*(\"[^\"]*\")|(\"[^\"]*\")\\s*(==|!=)\\s*(\\w+)");
-            m = stringEq.matcher(content);
+            m = P_STRING_EQ.matcher(content);
             while (m.find()) {
                 int line = getLineNumber(content, m.start());
                 if (!isInChangedLines(file, line)) continue;
@@ -1226,9 +1244,7 @@ public class RuleEngine {
 
     private static void reviewJavaModern(String content, String[] lines, ChangedFile file, List<Finding> findings, Config config) {
         // 1. Legacy java.util.Date / Calendar / SimpleDateFormat usage
-        Pattern legacyDate = Pattern.compile(
-            "(?:new\\s+(?:java\\.util\\.)?(?:Date|GregorianCalendar)\\s*\\(|Calendar\\.getInstance\\s*\\(|new\\s+SimpleDateFormat\\s*\\()");
-        Matcher m = legacyDate.matcher(content);
+        Matcher m = P_LEGACY_DATE.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -1241,10 +1257,7 @@ public class RuleEngine {
         }
 
         // 2. Raw collection types (missing generic type parameter)
-        // Matches: new ArrayList(), new HashMap() etc. WITHOUT a following < (the type param)
-        Pattern rawCollection = Pattern.compile(
-            "new\\s+(ArrayList|HashMap|HashSet|LinkedList|TreeMap|TreeSet|LinkedHashMap|LinkedHashSet|PriorityQueue|ArrayDeque)\\s*(?!\\s*<)\\s*\\(");
-        m = rawCollection.matcher(content);
+        m = P_RAW_COLL.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -1257,8 +1270,7 @@ public class RuleEngine {
         }
 
         // 3. Collections.EMPTY_LIST / EMPTY_SET / EMPTY_MAP (type-unsafe, use emptyList() etc.)
-        Pattern emptyCollections = Pattern.compile("Collections\\.(EMPTY_LIST|EMPTY_SET|EMPTY_MAP)\\b");
-        m = emptyCollections.matcher(content);
+        m = P_EMPTY_COLLS.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -1271,8 +1283,7 @@ public class RuleEngine {
         }
 
         // 4. Double-brace initialization (creates anonymous inner class — memory leak risk)
-        Pattern doubleBrace = Pattern.compile("new\\s+\\w+(?:<[^>]*>)?\\s*\\(\\s*\\)\\s*\\{\\s*\\{");
-        m = doubleBrace.matcher(content);
+        m = P_DOUBLE_BRACE.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -1283,8 +1294,7 @@ public class RuleEngine {
         }
 
         // 5. Math.random() for anything non-trivial (use ThreadLocalRandom or SecureRandom)
-        Pattern mathRandom = Pattern.compile("Math\\.random\\(\\)");
-        m = mathRandom.matcher(content);
+        m = P_MATH_RANDOM.matcher(content);
         while (m.find()) {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
@@ -1296,8 +1306,7 @@ public class RuleEngine {
 
         // 6. instanceof + explicit cast on next token (suggest Java 16+ pattern matching)
         if (config.javaSourceVersion >= 16) {
-            Pattern instanceofCast = Pattern.compile("instanceof\\s+(\\w+)\\b[^;{]*\\n[^;{]*\\(\\s*\\1\\s*\\)");
-            m = instanceofCast.matcher(content);
+            m = P_INSTANCEOF_CAST.matcher(content);
             while (m.find()) {
                 int line = getLineNumber(content, m.start());
                 if (!isInChangedLines(file, line)) continue;

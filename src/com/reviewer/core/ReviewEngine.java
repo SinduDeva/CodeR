@@ -30,6 +30,7 @@ public class ReviewEngine {
     private int totalStagedFiles = 0;
     private Map<String, Set<String>> reverseDependencyGraph = new HashMap<>();
     private Map<String, JavaSymbolIndex.ClassInfo> classInfoCache = new HashMap<>();
+    private final Map<String, String> fileContentCache = new HashMap<>();
     private JavaSymbolIndex symbolIndex;
     private Path repoRoot;
     private final Path CACHE_DIR = Paths.get(".code-reviewer-cache");
@@ -71,10 +72,13 @@ public class ReviewEngine {
             .filter(f -> f.endsWith(".java"))
             .collect(Collectors.toList());
         debug("Java files found: " + javaFiles);
-            
+
+        // One git process for all files instead of one per file
+        Map<String, Set<Integer>> changedLinesByFile = batchGetChangedLines(javaFiles);
+
         return javaFiles.stream()
             .map(f -> {
-                Set<Integer> lines = getChangedLines(f);
+                Set<Integer> lines = changedLinesByFile.getOrDefault(f, new HashSet<>());
                 if (config.expandChangedScopeToMethod) {
                     try {
                         lines = expandChangedLinesToMethodScope(f, lines);
@@ -83,6 +87,34 @@ public class ReviewEngine {
                 return new ChangedFile(f, Paths.get(f).getFileName().toString(), lines);
             })
             .collect(Collectors.toList());
+    }
+
+    /** Single git diff --staged -U0 call; parses per-file hunk headers for all Java files at once. */
+    private Map<String, Set<Integer>> batchGetChangedLines(List<String> javaFiles) {
+        Map<String, Set<Integer>> result = new LinkedHashMap<>();
+        for (String f : javaFiles) result.put(f, new HashSet<>());
+
+        List<String> diff = runGit("git", "diff", "--staged", "-U0");
+        String currentFile = null;
+        for (String line : diff) {
+            if (line.startsWith("+++ b/")) {
+                currentFile = line.substring(6); // strip "+++ b/" prefix
+            } else if (line.startsWith("@@") && currentFile != null && result.containsKey(currentFile)) {
+                int plusIndex = line.indexOf('+');
+                if (plusIndex == -1) continue;
+                String hunkPart = line.substring(plusIndex + 1);
+                int spaceIndex = hunkPart.indexOf(' ');
+                if (spaceIndex != -1) hunkPart = hunkPart.substring(0, spaceIndex);
+                String[] parts = hunkPart.split(",");
+                try {
+                    int start = Integer.parseInt(parts[0]);
+                    int count = parts.length > 1 ? Integer.parseInt(parts[1]) : 1;
+                    Set<Integer> fileLines = result.get(currentFile);
+                    for (int i = 0; i < count; i++) fileLines.add(start + i);
+                } catch (NumberFormatException ignored) {}
+            }
+        }
+        return result;
     }
 
     private Set<Integer> expandChangedLinesToMethodScope(String filePath, Set<Integer> changedLines) throws IOException {
@@ -254,13 +286,23 @@ public class ReviewEngine {
         return path.contains("/test/") || file.name.endsWith("Test.java");
     }
 
+    /** Reads a file once per session; subsequent calls return the cached content. */
+    private String readFileCached(Path path) throws IOException {
+        String key = path.toAbsolutePath().normalize().toString();
+        String cached = fileContentCache.get(key);
+        if (cached != null) return cached;
+        String content = Files.readString(path);
+        fileContentCache.put(key, content);
+        return content;
+    }
+
     private void reviewFile(ChangedFile file) throws IOException {
         Path fullPath = Path.of(file.path).toAbsolutePath();
         if (!Files.exists(fullPath)) {
             debug("File not found for review: " + fullPath);
             return;
         }
-        String content = Files.readString(fullPath);
+        String content = readFileCached(fullPath);
         String[] lines = content.split("\\R");
         RuleEngine.runRules(content, lines, file, findings, config);
     }
@@ -291,7 +333,7 @@ public class ReviewEngine {
             try {
                 Path path = resolvePath(f.path);
                 if (path == null || !Files.exists(path)) continue;
-                String content = Files.readString(path);
+                String content = readFileCached(path);
                 String className = classInfo.simpleName;
                 debug("Analyzing impact for " + classInfo.fqn + " (" + f.path + ")");
                 
@@ -337,7 +379,7 @@ public class ReviewEngine {
                         debug("Skipping dependent test file " + dependentFile);
                         continue;
                     }
-                    String depContent = Files.readString(depPath);
+                    String depContent = readFileCached(depPath);
                     String depClassName = depFileName.replace(".java", "");
 
                     // 1. Identify WHICH methods in the controller call the service
@@ -452,7 +494,7 @@ public class ReviewEngine {
                 }
                 String depContent;
                 try {
-                    depContent = Files.readString(depPath);
+                    depContent = readFileCached(depPath);
                 } catch (IOException e) {
                     continue;
                 }

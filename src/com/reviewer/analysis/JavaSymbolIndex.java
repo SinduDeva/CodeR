@@ -26,6 +26,8 @@ public class JavaSymbolIndex {
         "(?:class|interface|enum|record)\\s+(\\w+)"
     );
     private static final Pattern IMPORT_PATTERN = Pattern.compile("(?m)^\\s*import\\s+([\\w\\.\\*]+)\\s*;");
+    // Caches Pattern.compile("\\b<token>\\b") — built once per unique token per JVM session
+    private static final Map<String, Pattern> TOKEN_PATTERN_CACHE = new HashMap<>();
 
     private final Map<String, ClassInfo> classesByPath = new HashMap<>();
     private final Map<String, Set<ClassInfo>> classesBySimpleName = new HashMap<>();
@@ -164,7 +166,8 @@ public class JavaSymbolIndex {
 
     private static boolean containsToken(String content, String token) {
         if (token == null || token.isEmpty()) return false;
-        Pattern p = Pattern.compile("\\b" + Pattern.quote(token) + "\\b");
+        Pattern p = TOKEN_PATTERN_CACHE.computeIfAbsent(token,
+            k -> Pattern.compile("\\b" + Pattern.quote(k) + "\\b"));
         return p.matcher(content).find();
     }
 

@@ -152,8 +152,8 @@ public class Models {
         public boolean debug = false;
         public boolean enableTransitiveApiDiscovery = true;
         public int transitiveApiDiscoveryMaxDepth = 3;
-        public int transitiveApiDiscoveryMaxVisitedFiles = 200;
-        public int transitiveApiDiscoveryMaxControllers = 10;
+        public int transitiveApiDiscoveryMaxVisitedFiles = 30;
+        public int transitiveApiDiscoveryMaxControllers = 5;
         public String primaryModel = "gpt-5.1-codex";
         public String secondaryModel = "swe-1.5";
         public boolean useWindsurf = true;
