@@ -77,6 +77,36 @@ public class RuleEngine {
     // reviewOpenApi
     private static final Pattern P_MAPPING_ANNO    = Pattern.compile("@(?:GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping)\\b");
     private static final Pattern P_METHOD_PARAM    = Pattern.compile("(?:@RequestParam|@PathVariable|@RequestHeader)\\s+(?:[\\w<>\\[\\]]+)\\s+(\\w+)");
+    // reviewScheduled
+    private static final Pattern P_SCHED_HEADER    = Pattern.compile("@Scheduled\\b[^\\n]*\\n");
+
+    /**
+     * Well-known string values that carry semantic meaning as-is and do not need to
+     * be extracted into named constants.  HTTP verbs, standard status words,
+     * content-type tokens, encoding names, etc.
+     */
+    private static final Set<String> LITERAL_ALLOWLIST = Set.of(
+        // HTTP methods
+        "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE", "CONNECT",
+        // HTTP status text (Spring HttpStatus names)
+        "OK", "CREATED", "ACCEPTED", "NO_CONTENT", "MOVED_PERMANENTLY", "FOUND",
+        "NOT_MODIFIED", "BAD_REQUEST", "UNAUTHORIZED", "FORBIDDEN", "NOT_FOUND",
+        "CONFLICT", "GONE", "UNPROCESSABLE_ENTITY", "TOO_MANY_REQUESTS",
+        "INTERNAL_SERVER_ERROR", "NOT_IMPLEMENTED", "SERVICE_UNAVAILABLE",
+        // Common lifecycle / domain status words (often backed by enums already)
+        "SUCCESS", "FAILURE", "ERROR", "PENDING", "PROCESSING", "COMPLETED",
+        "ACTIVE", "INACTIVE", "ENABLED", "DISABLED", "OPEN", "CLOSED", "ARCHIVED",
+        "DRAFT", "PUBLISHED", "APPROVED", "REJECTED", "CANCELLED", "SUSPENDED",
+        // Media/content types and charset tokens
+        "json", "JSON", "xml", "XML", "html", "HTML", "text", "TEXT", "plain", "PLAIN",
+        "UTF-8", "utf-8", "ISO-8859-1", "US-ASCII",
+        // Boolean-like config values
+        "yes", "YES", "no", "NO", "on", "ON", "off", "OFF",
+        // Common short tokens that are not magic strings
+        "id", "ID", "UUID", "null", "true", "false",
+        // Framework / environment tags
+        "default", "DEFAULT", "test", "TEST", "main", "MAIN", "application", "APPLICATION"
+    );
 
     public static void runRules(String content, String[] lines, ChangedFile file, List<Finding> findings, Config config) {
         List<Range> methodRanges = findMethodRanges(lines);
@@ -621,12 +651,17 @@ public class RuleEngine {
         m = P_REQUEST_BODY.matcher(content);
         while (m.find()) {
             int start = m.start();
-            // Look behind for @Valid (approximate scan in preceding chars)
-            String preceding = content.substring(Math.max(0, start - 50), start);
-            // Look ahead for @Valid (approximate scan in following chars)
-            String following = content.substring(m.end(), Math.min(content.length(), m.end() + 50));
-            
-            boolean hasValid = preceding.contains("@Valid") || following.contains("@Valid") || preceding.contains("@Validated") || following.contains("@Validated");
+            // Scan the entire method parameter list rather than a fixed ±50 char window so that
+            // multi-line parameter lists (each param on its own line) are handled correctly.
+            // Walk backward to the opening ( of the method signature, then include the 300 chars
+            // before it so annotations on their own line (e.g. @Valid on the line above) are covered.
+            int paramOpen = content.lastIndexOf('(', start);
+            int paramClose = content.indexOf(')', start);
+            int annotationsStart = Math.max(0, (paramOpen >= 0 ? paramOpen : start) - 300);
+            int windowEnd = paramClose >= 0 ? Math.min(content.length(), paramClose + 1) : Math.min(content.length(), m.end() + 300);
+            String paramWindow = content.substring(annotationsStart, windowEnd);
+
+            boolean hasValid = paramWindow.contains("@Valid") || paramWindow.contains("@Validated");
             
             if (hasValid) continue;
 
@@ -864,6 +899,29 @@ public class RuleEngine {
                 "Spring's AOP proxy cannot intercept private methods, so @Cacheable is silently ignored here — the method will be called every time without any caching. Make it public or move it to a separate @Service bean.",
                 "@Cacheable(value = \"items\", key = \"#id\")\npublic Item findById(Long id) { ... }"));
         }
+
+        // @Scheduled method that blocks the scheduler thread by calling Future.get() or CompletableFuture.join()
+        // without a timeout.  This starves the shared scheduler thread pool.
+        m = P_SCHED_HEADER.matcher(content);
+        while (m.find()) {
+            int annoLine = getLineNumber(content, m.start());
+            // Find the opening brace of the method body
+            int braceStart = content.indexOf('{', m.end());
+            if (braceStart == -1) continue;
+            // Scan up to ~3000 chars of body (heuristic) for blocking calls
+            String body = content.substring(braceStart, Math.min(content.length(), braceStart + 3000));
+            boolean blocks = body.contains(".get()") || body.contains(".join()");
+            if (!blocks) continue;
+            if (!isInChangedLines(file, annoLine)) continue;
+            findings.add(new Finding(Severity.MUST_FIX, Category.SPRING_BOOT, file.name, annoLine, lines[annoLine - 1].trim(),
+                "I noticed this @Scheduled method blocks on a Future.",
+                "Calling Future.get() or CompletableFuture.join() inside a @Scheduled method blocks the scheduler thread. " +
+                "Spring's default scheduler uses a single thread, so one blocked task can freeze ALL scheduled jobs. " +
+                "Either use a timeout (.get(5, TimeUnit.SECONDS)), orTimeout(), or fire-and-forget without waiting for the result.",
+                "@Scheduled(fixedRateString = \"PT1M\")\npublic void task() {\n" +
+                "    asyncOp().orTimeout(10, TimeUnit.SECONDS)\n" +
+                "              .exceptionally(ex -> { log.error(\"Task failed\", ex); return null; });\n}"));
+        }
     }
 
     private static void reviewOpenApi(String content, String[] lines, ChangedFile file, List<Finding> findings, AnalysisContext context) {
@@ -950,10 +1008,18 @@ public class RuleEngine {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
             String call = m.group(1);
-            if (call.contains("()")) { // Simplified check for method call
+            if (call.contains("()")) {
+                // Only flag when the argument looks like a potentially expensive operation.
+                // Cheap factory methods (Optional.of, List.of, Collections.emptyList, etc.) are fine.
+                boolean looksExpensive = call.startsWith("new ")
+                    || call.matches("(?i).*(find|fetch|load|query|search|request|invoke|execute|send|select|retrieve|compute|calculate|call)\\w*\\(.*")
+                    || call.contains("Repository.")
+                    || call.contains("Service.")
+                    || call.contains("Client.");
+                if (!looksExpensive) continue;
                 findings.add(new Finding(Severity.SHOULD_FIX, Category.PERFORMANCE, file.name, line, lines[line-1].trim(),
                     "We might want to use .orElseGet() here.",
-                    ".orElse() evaluates its argument even if the Optional is present, which can be unnecessary work if the method call is expensive. .orElseGet() is lazy.",
+                    ".orElse() evaluates its argument even if the Optional is present, which can be unnecessary work if the method call is expensive. .orElseGet() is lazy — it only calls the supplier when the value is absent.",
                     ".orElseGet(() -> " + call + ")"));
             }
         }
@@ -1066,7 +1132,7 @@ public class RuleEngine {
             int line = getLineNumber(content, m.start());
             if (!isInChangedLines(file, line)) continue;
             String literal = m.group(1);
-            if (literal.equalsIgnoreCase("true") || literal.equalsIgnoreCase("false") || literal.equalsIgnoreCase("null")) continue;
+            if (LITERAL_ALLOWLIST.contains(literal) || LITERAL_ALLOWLIST.contains(literal.toUpperCase())) continue;
             String sourceLine = lines[line-1];
             if (sourceLine.contains("log.") || sourceLine.matches(".*\\blog\\.(info|debug|warn|error|trace)\\(.*")) continue; // allow log messages
             
@@ -1102,9 +1168,8 @@ public class RuleEngine {
         while (m.find()) {
             literalOccurrences.computeIfAbsent(m.group(1), k -> new ArrayList<>()).add(getLineNumber(content, m.start()));
         }
-        Set<String> literalSkip = Set.of("GET", "POST", "PUT", "DELETE", "JSON", "XML", "OK", "ID", "UUID");
         for (Map.Entry<String, List<Integer>> entry : literalOccurrences.entrySet()) {
-            if (entry.getValue().size() < 2 || literalSkip.contains(entry.getKey())) continue;
+            if (entry.getValue().size() < 2 || LITERAL_ALLOWLIST.contains(entry.getKey())) continue;
             int flagged = entry.getValue().stream().filter(l -> isInChangedLines(file, l)).findFirst().orElse(-1);
             if (flagged == -1) continue;
             String code = lines[flagged - 1].trim();
@@ -1184,6 +1249,7 @@ public class RuleEngine {
             String val = m.group(1);
             String sourceLine = lines[line-1];
             if (sourceLine.contains("static final")) continue;
+            if (LITERAL_ALLOWLIST.contains(val)) continue;
             if (sourceLine.contains("log.") || sourceLine.matches(".*\\blog\\.(info|debug|warn|error|trace)\\(.*")) continue; // Ignore log messages
             tokensByLine.computeIfAbsent(line, k -> new ArrayList<>()).add(val);
         }

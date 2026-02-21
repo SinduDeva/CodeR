@@ -48,6 +48,7 @@ public class HtmlReportGenerator {
         html.append("<div class='main-content'>\n");
         html.append("<div class='content'>\n");
         appendStatusBanner(html, blocked, mustFix, shouldFix);
+        appendRiskSummary(html, findings);
         if (config.showTestingScope) {
             appendTestingNotes(html, testingStatusByFile);
         }
@@ -279,6 +280,17 @@ public class HtmlReportGenerator {
         html.append(".theme-toggle .theme-thumb { position: absolute; top: 4px; left: 6px; width: 24px; height: 24px; border-radius: 999px; background: var(--toggle-thumb); box-shadow: 0 2px 4px rgba(0,0,0,0.2); transition: transform 0.2s ease; }\n");
         html.append(".theme-toggle[data-theme='dark'] .theme-thumb { transform: translateX(34px); }\n");
         html.append(".theme-toggle:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }\n");
+        // Risk summary panel
+        html.append(".risk-summary { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; padding: 14px 18px; border-radius: 10px; background: var(--bg-content); border: 1px solid var(--border-color); box-shadow: var(--card-shadow); }\n");
+        html.append(".risk-summary-title { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 4px; }\n");
+        html.append(".risk-summary-grid { display: flex; flex-wrap: wrap; gap: 8px; }\n");
+        html.append(".risk-item { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 8px; background: var(--bg-muted); border: 1px solid var(--border-color); }\n");
+        html.append(".risk-cat-label { font-size: 13px; font-weight: 500; color: var(--text-secondary); }\n");
+        html.append(".risk-badges { display: flex; gap: 4px; }\n");
+        html.append(".risk-badge { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 10px; }\n");
+        html.append(".risk-critical { background: var(--severity-critical-bg); color: var(--severity-critical-text); }\n");
+        html.append(".risk-warning  { background: var(--severity-warning-bg);  color: var(--severity-warning-text);  }\n");
+        html.append(".risk-info     { background: var(--severity-consider-bg); color: var(--severity-consider-text); }\n");
         html.append("</style>\n");
     }
 
@@ -336,6 +348,48 @@ public class HtmlReportGenerator {
         } else {
             html.append("<div class='status status-good'>&#10003; STATUS: LOOKS GOOD - Ready to commit</div>\n");
         }
+    }
+
+    private static void appendRiskSummary(StringBuilder html, List<Finding> findings) {
+        if (findings == null || findings.isEmpty()) return;
+
+        // Count by category × severity
+        Map<Category, long[]> counts = new LinkedHashMap<>();
+        for (Category cat : Category.values()) counts.put(cat, new long[]{0, 0, 0});
+        for (Finding f : findings) {
+            if (f.category == null) continue;
+            long[] c = counts.get(f.category);
+            if (c == null) continue;
+            if (f.severity == Severity.MUST_FIX)      c[0]++;
+            else if (f.severity == Severity.SHOULD_FIX) c[1]++;
+            else                                        c[2]++;
+        }
+
+        List<Map.Entry<Category, long[]>> active = counts.entrySet().stream()
+            .filter(e -> e.getValue()[0] + e.getValue()[1] + e.getValue()[2] > 0)
+            .collect(Collectors.toList());
+        if (active.isEmpty()) return;
+
+        html.append("<div class='risk-summary'>\n");
+        html.append("  <div class='risk-summary-title'>Issues by category</div>\n");
+        html.append("  <div class='risk-summary-grid'>\n");
+        for (Map.Entry<Category, long[]> e : active) {
+            long[] c = e.getValue();
+            html.append("    <div class='risk-item'>\n");
+            html.append("      <span class='risk-cat-label'>").append(formatCategoryLabel(e.getKey())).append("</span>\n");
+            html.append("      <span class='risk-badges'>");
+            if (c[0] > 0) html.append("<span class='risk-badge risk-critical'>").append(c[0]).append("</span>");
+            if (c[1] > 0) html.append("<span class='risk-badge risk-warning'>").append(c[1]).append("</span>");
+            if (c[2] > 0) html.append("<span class='risk-badge risk-info'>").append(c[2]).append("</span>");
+            html.append("</span>\n");
+            html.append("    </div>\n");
+        }
+        html.append("  </div>\n");
+        html.append("</div>\n");
+    }
+
+    private static String formatCategoryLabel(Category cat) {
+        return cat.displayName;
     }
 
     private static void appendTestingNotes(StringBuilder html, Map<String, TestingStatus> statusMap) {
