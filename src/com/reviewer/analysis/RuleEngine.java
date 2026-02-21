@@ -551,6 +551,8 @@ public class RuleEngine {
             
             for (LogCall call : callsInMethod) {
                 for (String var : call.args) {
+                    // Skip bare exception variables — logging "e" or "exception" in every catch block is expected
+                    if (var.equals("e") || var.equalsIgnoreCase("exception")) continue;
                     varOccurrences.computeIfAbsent(var, k -> new ArrayList<>()).add(call.line);
                 }
             }
@@ -574,7 +576,7 @@ public class RuleEngine {
             }
         }
 
-        detectDuplicateLogs(logCalls, lines, loggingScope, file, findings, methodRanges);
+        // Message-only repetition is intentionally not flagged (same message in different branches is normal)
     }
 
     private static void detectDuplicateLogs(List<LogCall> logCalls, String[] lines, Set<Integer> loggingScope, ChangedFile file, List<Finding> findings, List<Range> ranges) {
