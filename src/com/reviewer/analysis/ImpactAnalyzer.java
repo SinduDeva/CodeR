@@ -193,7 +193,24 @@ public class ImpactAnalyzer {
         return getMethodsCalling(content, targetSimpleName, targetFqn, touchedMethods, true);
     }
 
+    /**
+     * Finds methods in {@code content} that call any of {@code touchedMethods} on the target class.
+     * {@code supertypeSimpleNames} lists the target's interfaces/superclass simple names so that
+     * injection via interface type (e.g. {@code @Autowired IFoo foo;}) is also detected.
+     */
+    public static List<String> getMethodsCalling(String content, String targetSimpleName, String targetFqn,
+                                                  List<String> supertypeSimpleNames,
+                                                  List<String> touchedMethods, boolean allowBroadFallback) {
+        return getMethodsCallingImpl(content, targetSimpleName, targetFqn, supertypeSimpleNames, touchedMethods, allowBroadFallback);
+    }
+
     public static List<String> getMethodsCalling(String content, String targetSimpleName, String targetFqn, List<String> touchedMethods, boolean allowBroadFallback) {
+        return getMethodsCallingImpl(content, targetSimpleName, targetFqn, Collections.emptyList(), touchedMethods, allowBroadFallback);
+    }
+
+    private static List<String> getMethodsCallingImpl(String content, String targetSimpleName, String targetFqn,
+                                                       List<String> supertypeSimpleNames,
+                                                       List<String> touchedMethods, boolean allowBroadFallback) {
         if (content == null || content.isBlank() || touchedMethods == null || touchedMethods.isEmpty()) {
             return Collections.emptyList();
         }
@@ -217,8 +234,9 @@ public class ImpactAnalyzer {
 
         Set<String> callers = new HashSet<>();
 
-        // 1. Identify ALL possible instance names (variables, constructor params, fields)
-        Set<String> instanceNames = extractInstanceNames(content, targetSimpleName, targetFqn);
+        // 1. Identify ALL possible instance names (variables, constructor params, fields).
+        // supertypeSimpleNames allows detection when the field is typed as an interface the target implements.
+        Set<String> instanceNames = extractInstanceNames(content, targetSimpleName, targetFqn, supertypeSimpleNames);
 
         // Also consider static calls like TargetClass.someMethod(...)
         if (targetSimpleName != null && !targetSimpleName.isBlank()) {
@@ -503,11 +521,19 @@ public class ImpactAnalyzer {
         return (backslashCount & 1) == 1;
     }
 
-    private static Set<String> extractInstanceNames(String content, String targetSimpleName, String targetFqn) {
+    private static Set<String> extractInstanceNames(String content, String targetSimpleName, String targetFqn,
+                                                     List<String> supertypeSimpleNames) {
         Set<String> instanceNames = new HashSet<>();
         Set<String> typeTokens = new LinkedHashSet<>();
         if (targetSimpleName != null && !targetSimpleName.isBlank()) typeTokens.add(targetSimpleName);
         if (targetFqn != null && !targetFqn.isBlank()) typeTokens.add(targetFqn);
+        // Include interface/superclass names so injection via interface type is detected.
+        // e.g. @Autowired ITargetService svc; — 'ITargetService' resolves 'svc' as an instance name.
+        if (supertypeSimpleNames != null) {
+            for (String s : supertypeSimpleNames) {
+                if (s != null && !s.isBlank()) typeTokens.add(s);
+            }
+        }
 
         for (String token : typeTokens) {
             Pattern instancePattern = Pattern.compile("\\b" + Pattern.quote(token) + "\\b(?:<[^>]*>)?\\s+(\\w+)\\b");

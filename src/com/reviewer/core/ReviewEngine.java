@@ -396,8 +396,9 @@ public class ReviewEngine {
                     String depContent = readFileCached(depPath);
                     String depClassName = depFileName.replace(".java", "");
 
-                    // 1. Identify WHICH methods in the controller call the service
-                    List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, classInfo.simpleName, classInfo.fqn, touchedMethods);
+                    // 1. Identify WHICH methods in the controller call the service.
+                    // Pass supertypeSimpleNames so injection via interface type is also detected.
+                    List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, classInfo.simpleName, classInfo.fqn, classInfo.supertypeSimpleNames, touchedMethods, true);
                     debug("Calling methods in " + depFileName + " -> " + callingMethods);
 
 
@@ -476,7 +477,7 @@ public class ReviewEngine {
         Set<String> visitedPaths = new HashSet<>();
         List<String> endpoints = new ArrayList<>();
 
-        queue.add(new TransitiveNode(startClass.fqn, ImpactAnalyzer.filterValidMethodNames(initialTouchedMethods), 0));
+        queue.add(new TransitiveNode(startClass.fqn, ImpactAnalyzer.filterValidMethodNames(initialTouchedMethods), 0, startClass.supertypeSimpleNames));
         visitedFqns.add(startClass.fqn);
 
         int visitedFiles = 0;
@@ -519,7 +520,7 @@ public class ReviewEngine {
                 // Only traverse/record endpoints if we can prove a call chain to the impacted methods.
                 String currentSimpleName = simpleNameFromFqn(node.fqn);
                 debug("Transitive: checking " + depFileName + " for calls to " + currentSimpleName + "." + node.impactedMethods);
-                List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, currentSimpleName, node.fqn, node.impactedMethods, false);
+                List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, currentSimpleName, node.fqn, node.supertypeSimpleNames, node.impactedMethods, false);
                 callingMethods = ImpactAnalyzer.filterValidMethodNames(callingMethods);
                 debug("Transitive: found calling methods in " + depFileName + ": " + callingMethods);
                 if (callingMethods.isEmpty()) {
@@ -552,7 +553,7 @@ public class ReviewEngine {
                     if (!visitedFqns.add(depInfo.fqn)) {
                         continue;
                     }
-                    queue.add(new TransitiveNode(depInfo.fqn, callingMethods, node.depth + 1));
+                    queue.add(new TransitiveNode(depInfo.fqn, callingMethods, node.depth + 1, depInfo.supertypeSimpleNames));
                 }
             }
         }
@@ -631,10 +632,13 @@ public class ReviewEngine {
         final String fqn;
         final List<String> impactedMethods;
         final int depth;
-        TransitiveNode(String fqn, List<String> impactedMethods, int depth) {
+        /** Simple names of the target's supertypes/interfaces for interface-injection detection. */
+        final List<String> supertypeSimpleNames;
+        TransitiveNode(String fqn, List<String> impactedMethods, int depth, List<String> supertypeSimpleNames) {
             this.fqn = fqn;
             this.impactedMethods = impactedMethods;
             this.depth = depth;
+            this.supertypeSimpleNames = supertypeSimpleNames != null ? supertypeSimpleNames : Collections.emptyList();
         }
     }
 
