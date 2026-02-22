@@ -110,7 +110,16 @@ public class ReviewEngine {
                     int start = Integer.parseInt(parts[0]);
                     int count = parts.length > 1 ? Integer.parseInt(parts[1]) : 1;
                     Set<Integer> fileLines = result.get(currentFile);
-                    for (int i = 0; i < count; i++) fileLines.add(start + i);
+                    // count == 0 means a pure-deletion hunk: @@ -old,N +new,0 @@
+                    // No new lines were added, so the loop body never runs and changedLines
+                    // stays empty, causing touched-method detection to return [].
+                    // Fix: record 'start' (the new-file position of the deletion) so the
+                    // intersection check in extractTouchedMethods() can still find the method.
+                    if (count == 0) {
+                        fileLines.add(start);
+                    } else {
+                        for (int i = 0; i < count; i++) fileLines.add(start + i);
+                    }
                 } catch (NumberFormatException ignored) {}
             }
         }
@@ -220,10 +229,15 @@ public class ReviewEngine {
                     String[] parts = hunkPart.split(",");
                     int start = Integer.parseInt(parts[0]);
                     int count = (parts.length > 1) ? Integer.parseInt(parts[1]) : 1;
-                    
-                    // If count is 0, it means only deletions occurred at this position
-                    for (int i = 0; i < count; i++) {
-                        lines.add(start + i);
+
+                    // If count is 0, it means only deletions occurred at this position.
+                    // Record 'start' so touched-method detection can still find the method.
+                    if (count == 0) {
+                        lines.add(start);
+                    } else {
+                        for (int i = 0; i < count; i++) {
+                            lines.add(start + i);
+                        }
                     }
                 }
             }
