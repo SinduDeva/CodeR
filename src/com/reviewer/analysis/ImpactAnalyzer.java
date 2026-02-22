@@ -659,6 +659,12 @@ public class ImpactAnalyzer {
                     annoStart--;
                     continue;
                 }
+                // HARD STOP: closing brace marks end of previous method body — annotations cannot appear before it.
+                // This prevents accidentally picking up annotations from preceding methods.
+                if (l.equals("}")) {
+                    debug("[DEBUG] extractControllerEndpoints: hit closing brace at line " + (annoStart+1) + " — stopping annotation scan (end of previous block)");
+                    break;
+                }
                 if (l.startsWith("@")) {
                     lastAnnotationLine = annoStart;
                     nonAnnotationLinesSeen = 0;  // Reset counter when we find an annotation
