@@ -120,6 +120,12 @@ public class Models {
         public final List<String> functions = new ArrayList<>();
         public final List<String> notes = new ArrayList<>();
         public final List<String> recommendedTests = new ArrayList<>();
+        /**
+         * Files that were proven to call at least one touched method (method-scoped graph).
+         * Populated during impact analysis; used in the HTML report when
+         * {@link Config#methodScopedDependencyGraph} is {@code true}.
+         */
+        public final List<String> methodScopedDependents = new ArrayList<>();
 
         public ImpactEntry(String fileName) {
             this.fileName = fileName;
@@ -164,5 +170,12 @@ public class Models {
         public String pmdRulesetPath = "config/pmd/changelens-ruleset.xml";
         // Target Java source version; used to gate version-specific rules (e.g. pattern matching >= 16)
         public int javaSourceVersion = 17;
+        /**
+         * Controls what the "Dependency Mapping" graph in the HTML report displays.
+         * {@code true}  (default) — method-scoped: only files that call a changed method.
+         * {@code false}           — class-level:   all files that import/reference the class.
+         * Falls back to class-level automatically when no method-scoped dependents were found.
+         */
+        public boolean methodScopedDependencyGraph = true;
     }
 }

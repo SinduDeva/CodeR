@@ -55,7 +55,7 @@ public class HtmlReportGenerator {
 
         int fileIndex = 0;
         for (ChangedFile f : files) {
-            appendFileSection(html, f, fileIndex++, findingsByFile, impactByFile, reverseDependencyGraph, testingStatusByFile);
+            appendFileSection(html, f, fileIndex++, findingsByFile, impactByFile, reverseDependencyGraph, testingStatusByFile, config.methodScopedDependencyGraph);
         }
         
         if (files.isEmpty()) {
@@ -404,7 +404,7 @@ public class HtmlReportGenerator {
         html.append("</ul>\n</div>\n");
     }
 
-    private static void appendFileSection(StringBuilder html, ChangedFile f, int index, Map<String, List<Finding>> findingsByFile, Map<String, ImpactEntry> impactByFile, Map<String, Set<String>> reverseGraph, Map<String, TestingStatus> statusMap) {
+    private static void appendFileSection(StringBuilder html, ChangedFile f, int index, Map<String, List<Finding>> findingsByFile, Map<String, ImpactEntry> impactByFile, Map<String, Set<String>> reverseGraph, Map<String, TestingStatus> statusMap, boolean methodScopedGraph) {
         String active = (index == 0) ? " active" : "";
         html.append("<div class='file-content").append(active).append("' id='file-").append(index).append("'>\n");
         html.append("<h2>").append(escapeHtml(f.name)).append("</h2>\n");
@@ -429,7 +429,7 @@ public class HtmlReportGenerator {
         }
 
         if (impact != null) {
-            appendImpactMap(html, impact, f, reverseGraph);
+            appendImpactMap(html, impact, f, reverseGraph, methodScopedGraph);
         }
 
         if (fileFindings.isEmpty()) {
@@ -685,7 +685,7 @@ public class HtmlReportGenerator {
         else sb.append(start).append('-').append(end);
     }
 
-    private static void appendImpactMap(StringBuilder html, ImpactEntry impact, ChangedFile f, Map<String, Set<String>> reverseGraph) {
+    private static void appendImpactMap(StringBuilder html, ImpactEntry impact, ChangedFile f, Map<String, Set<String>> reverseGraph, boolean methodScopedGraph) {
         html.append("<div class='impact-map'>\n");
         if (!impact.layers.isEmpty()) {
             html.append("<div class='impact-row'><span class='impact-label'>Layers:</span><span>");
@@ -709,17 +709,35 @@ public class HtmlReportGenerator {
         appendCollapsibleList(html, "Impact Notes", "Contextual insights", displayNotes, "notes");
         appendCollapsibleList(html, "Related Tests", impact.recommendedTests.isEmpty() ? "No mapped tests" : "Tests to run", impact.recommendedTests, "tests");
 
-        // Reverse Dependency Graph Visualization
-        String impactKey = null;
-        if (impact != null && impact.fullyQualifiedName != null && !impact.fullyQualifiedName.isBlank()) {
-            impactKey = impact.fullyQualifiedName;
+        // Dependency Graph Visualization
+        String impactKey = (impact.fullyQualifiedName != null && !impact.fullyQualifiedName.isBlank())
+            ? impact.fullyQualifiedName : f.name.replace(".java", "");
+
+        // Decide which set of dependents to display based on config.
+        // Method-scoped: only files proven to call a changed method (precise, default).
+        // Class-level:   all files that import/reference the class (broad, may include noise).
+        // Always fall back to class-level if method-scoped list is empty
+        // (e.g. no touched methods were identified, or the changed file is a controller itself).
+        Set<String> classLevelDeps = reverseGraph == null ? Collections.emptySet()
+            : reverseGraph.getOrDefault(impactKey, reverseGraph.getOrDefault(f.name.replace(".java", ""), Collections.emptySet()));
+
+        boolean usingMethodScope = methodScopedGraph && !impact.methodScopedDependents.isEmpty();
+        Set<String> dependents;
+        String graphTitle;
+        String graphSubtitle;
+        if (usingMethodScope) {
+            dependents = new LinkedHashSet<>(impact.methodScopedDependents);
+            graphTitle  = "Method-Scoped Dependents";
+            graphSubtitle = "Files calling changed methods";
+        } else {
+            dependents = classLevelDeps;
+            graphTitle  = "Class-Level Dependents";
+            graphSubtitle = methodScopedGraph
+                ? "All class references (no method callers found)"
+                : "All files referencing this class";
         }
-        if (impactKey == null) {
-            impactKey = f.name.replace(".java", "");
-        }
-        Set<String> dependents = reverseGraph == null ? Collections.emptySet() :
-            reverseGraph.getOrDefault(impactKey, reverseGraph.getOrDefault(f.name.replace(".java", ""), Collections.emptySet()));
-        appendCollapsibleGraph(html, impactKey, dependents);
+
+        appendCollapsibleGraph(html, impactKey, dependents, graphTitle, graphSubtitle);
         html.append("</div>\n");
     }
 
@@ -745,7 +763,7 @@ public class HtmlReportGenerator {
         html.append("</ul></div></div>");
     }
 
-    private static void appendCollapsibleGraph(StringBuilder html, String impactKey, Set<String> dependents) {
+    private static void appendCollapsibleGraph(StringBuilder html, String impactKey, Set<String> dependents, String title, String subtitle) {
         if (dependents == null || dependents.isEmpty()) return;
         List<String> prodDeps = new ArrayList<>();
         List<String> testDeps = new ArrayList<>();
@@ -760,7 +778,12 @@ public class HtmlReportGenerator {
         String cardId = "graph-" + UUID.randomUUID().toString().replace("-", "");
         html.append("<div class='collapsible-card' id='").append(cardId).append("'>");
         html.append("<div class='collapsible-header' onclick=\"toggleCard('").append(cardId).append("')\">");
-        html.append("<span>Reverse Dependency Mapping</span>");
+        html.append("<div class='collapsible-title'>");
+        html.append("<span>").append(escapeHtml(title)).append("</span>");
+        if (subtitle != null && !subtitle.isBlank()) {
+            html.append("<span class='title-subtext'>").append(escapeHtml(subtitle)).append("</span>");
+        }
+        html.append("</div>");
         html.append("<span class='inline-count api'>").append(dependents.size()).append("</span>");
         html.append("<span class='chevron'>&#9662;</span>");
         html.append("</div>");

@@ -123,6 +123,7 @@ public class Main {
         config.pmdPath = props.getProperty("pmd.path", config.pmdPath);
         config.pmdRulesetPath = props.getProperty("pmd.ruleset.path", config.pmdRulesetPath);
         config.javaSourceVersion = Integer.parseInt(props.getProperty("java.source.version", String.valueOf(config.javaSourceVersion)));
+        config.methodScopedDependencyGraph = Boolean.parseBoolean(props.getProperty("dependency.graph.scope.method", String.valueOf(config.methodScopedDependencyGraph)));
     }
 
     private static void openReport(String reportPath) {

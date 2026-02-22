@@ -402,6 +402,8 @@ public class ReviewEngine {
 
 
                     if (!callingMethods.isEmpty()) {
+                        // Track method-scoped dependents for the graph display.
+                        entry.methodScopedDependents.add(dependentFile);
                         String depType = classifyDependencyType(depContent, classInfo);
                         for (String caller : callingMethods) {
                             entry.notes.add("Impacted Method [" + depType + "]: " + depFileName + " -> " + caller + "()");
