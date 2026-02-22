@@ -402,8 +402,9 @@ public class ReviewEngine {
 
 
                     if (!callingMethods.isEmpty()) {
+                        String depType = classifyDependencyType(depContent, classInfo);
                         for (String caller : callingMethods) {
-                            entry.notes.add("Impacted Method: " + depFileName + " -> " + caller + "()");
+                            entry.notes.add("Impacted Method [" + depType + "]: " + depFileName + " -> " + caller + "()");
                         }
 
                         if (depContent.contains("@RestController") || depContent.contains("@Controller")) {
@@ -574,10 +575,45 @@ public class ReviewEngine {
         if (targetInfo == null) {
             return Collections.emptySet();
         }
-        Map<String, Set<String>> computed = symbolIndex.buildReverseDependencyGraph(Collections.singletonList(targetInfo));
+        // Pass the shared content cache to avoid re-reading files already in memory.
+        Map<String, Set<String>> computed = symbolIndex.buildReverseDependencyGraph(
+                Collections.singletonList(targetInfo), fileContentCache);
         Set<String> deps = computed.getOrDefault(fqn, Collections.emptySet());
         reverseDependencyGraph.put(fqn, new LinkedHashSet<>(deps));
         return reverseDependencyGraph.get(fqn);
+    }
+
+    /**
+     * Classifies how a candidate file depends on the target class.
+     * Returns one of: "INJECTED" (Spring @Autowired/@Inject), "EXTENDS" (inheritance),
+     * or "CALLS" (direct method/constructor call usage).
+     */
+    private String classifyDependencyType(String candidateContent, JavaSymbolIndex.ClassInfo target) {
+        boolean hasInjectionAnno = candidateContent.contains("@Autowired") || candidateContent.contains("@Inject");
+        if (hasInjectionAnno) {
+            // Field uses the target type directly
+            if (containsWordToken(candidateContent, target.simpleName)) return "INJECTED";
+            // Field uses one of the target's interfaces (most common Spring pattern)
+            for (String supertype : target.supertypeSimpleNames) {
+                if (containsWordToken(candidateContent, supertype)) return "INJECTED";
+            }
+        }
+        // Check extends/implements
+        Pattern inheritPattern = Pattern.compile(
+            "(?:extends|implements)[^{]*\\b" + Pattern.quote(target.simpleName) + "\\b");
+        if (inheritPattern.matcher(candidateContent).find()) return "EXTENDS";
+        for (String supertype : target.supertypeSimpleNames) {
+            Pattern supertypeInherit = Pattern.compile(
+                "(?:extends|implements)[^{]*\\b" + Pattern.quote(supertype) + "\\b");
+            if (supertypeInherit.matcher(candidateContent).find()) return "EXTENDS";
+        }
+        return "CALLS";
+    }
+
+    private static boolean containsWordToken(String content, String token) {
+        if (token == null || token.isEmpty()) return false;
+        Pattern p = Pattern.compile("\\b" + Pattern.quote(token) + "\\b");
+        return p.matcher(content).find();
     }
 
     private static String simpleNameFromFqn(String fqn) {
@@ -624,11 +660,108 @@ public class ReviewEngine {
             reverseDependencyGraph = Collections.emptyMap();
             return;
         }
+
+        // Try loading the graph from the disk cache first (avoids re-reading all source files).
+        Map<String, Set<String>> cached = tryLoadGraphCache(changedFiles);
+        if (cached != null) {
+            reverseDependencyGraph = cached;
+            debug("Dependency graph loaded from disk cache.");
+            return;
+        }
+
         List<JavaSymbolIndex.ClassInfo> targets = changedFiles.stream()
             .map(this::resolveClassInfo)
             .filter(Objects::nonNull)
             .collect(Collectors.toList());
-        reverseDependencyGraph = symbolIndex.buildReverseDependencyGraph(targets);
+
+        // Pass the in-memory content cache so JavaSymbolIndex does not re-read files
+        // that ReviewEngine has already loaded via readFileCached().
+        reverseDependencyGraph = symbolIndex.buildReverseDependencyGraph(targets, fileContentCache);
+
+        saveGraphCache(changedFiles, reverseDependencyGraph);
+    }
+
+    // ── Disk cache helpers ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Attempts to load the dependency graph from the disk cache.
+     * Returns null if the cache is missing, stale, or corrupt.
+     * Cache format (one entry per line):
+     *   V=1
+     *   KEY=<csv of path:mtime pairs for changed files>
+     *   DEP=<targetFqn>=<dep1|dep2|…>
+     */
+    private Map<String, Set<String>> tryLoadGraphCache(List<ChangedFile> changedFiles) {
+        try {
+            if (!Files.exists(GRAPH_CACHE)) return null;
+            List<String> lines = Files.readAllLines(GRAPH_CACHE, java.nio.charset.StandardCharsets.UTF_8);
+            if (lines.size() < 2) return null;
+            if (!"V=1".equals(lines.get(0))) return null;
+
+            String expectedKey = "KEY=" + buildCacheKey(changedFiles);
+            if (!expectedKey.equals(lines.get(1))) return null;
+
+            Map<String, Set<String>> graph = new LinkedHashMap<>();
+            for (int i = 2; i < lines.size(); i++) {
+                String line = lines.get(i);
+                if (!line.startsWith("DEP=")) continue;
+                String rest = line.substring(4);
+                int eq = rest.indexOf('=');
+                if (eq == -1) continue;
+                String fqn = rest.substring(0, eq);
+                String pathsPart = rest.substring(eq + 1);
+                Set<String> paths = new LinkedHashSet<>();
+                if (!pathsPart.isEmpty()) {
+                    for (String p : pathsPart.split("\\|")) {
+                        if (!p.isEmpty()) paths.add(p);
+                    }
+                }
+                graph.put(fqn, paths);
+            }
+            debug("Graph cache hit — key: " + expectedKey);
+            return graph;
+        } catch (Exception e) {
+            debug("Graph cache load failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    private void saveGraphCache(List<ChangedFile> changedFiles, Map<String, Set<String>> graph) {
+        try {
+            Files.createDirectories(CACHE_DIR);
+            StringBuilder sb = new StringBuilder();
+            sb.append("V=1\n");
+            sb.append("KEY=").append(buildCacheKey(changedFiles)).append('\n');
+            for (Map.Entry<String, Set<String>> entry : graph.entrySet()) {
+                sb.append("DEP=").append(entry.getKey()).append('=');
+                sb.append(String.join("|", entry.getValue()));
+                sb.append('\n');
+            }
+            Files.writeString(GRAPH_CACHE, sb.toString(), java.nio.charset.StandardCharsets.UTF_8);
+            debug("Graph cache saved.");
+        } catch (Exception e) {
+            debug("Graph cache save failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Builds a stable cache key from the changed files' paths and modification times.
+     * Any file content change or set change invalidates the cache.
+     */
+    private String buildCacheKey(List<ChangedFile> changedFiles) {
+        return changedFiles.stream()
+            .sorted(Comparator.comparing(f -> f.path))
+            .map(f -> {
+                try {
+                    Path p = resolvePath(f.path);
+                    long mtime = (p != null && Files.exists(p))
+                        ? Files.getLastModifiedTime(p).toMillis() : 0L;
+                    return f.path + ":" + mtime;
+                } catch (IOException e) {
+                    return f.path + ":0";
+                }
+            })
+            .collect(Collectors.joining(","));
     }
 
     private void ensureSymbolIndex() {
