@@ -548,6 +548,15 @@ public class ReviewEngine {
                     if (controllerEndpoints == null || controllerEndpoints.isEmpty()) {
                         controllerEndpoints = ImpactAnalyzer.extractControllerEndpoints(depContent, depInfo.simpleName, callingMethods);
                     }
+
+                    // Fallback: if we found calling methods but no specific endpoints, extract all endpoints.
+                    // This handles cases where endpoint annotation parsing failed (e.g., method in base class,
+                    // complex annotation forms). If the controller method calls the chain, it's likely an endpoint.
+                    if ((controllerEndpoints == null || controllerEndpoints.isEmpty()) && !callingMethods.isEmpty()) {
+                        debug("Transitive: calling methods found but no endpoints extracted for " + depFileName + "; using fallback to extract all controller endpoints");
+                        controllerEndpoints = ImpactAnalyzer.extractAllControllerEndpoints(depContent, depInfo.simpleName);
+                    }
+
                     if (controllerEndpoints != null) endpoints.addAll(controllerEndpoints);
                 } else {
                     if (!visitedFqns.add(depInfo.fqn)) {

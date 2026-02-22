@@ -644,9 +644,15 @@ public class ImpactAnalyzer {
             int methodLineIdx = Math.max(0, Math.min(lines.length - 1, methodLine - 1));
             debug("[DEBUG] extractControllerEndpoints: found method " + methodName + " at line " + methodLine + " (idx=" + methodLineIdx + "), match start was at line " + getLineNumber(content, dm.start()) + ", publicPos=" + publicPos);
 
+            // Scan backward for annotations. Expand window to 100 lines to handle comments/spacing.
+            // Be lenient: if we find ANY mapping annotation, use it even if scan was interrupted.
             int annoStart = methodLineIdx - 1;
             int lastAnnotationLine = -1;
-            while (annoStart >= 0 && annoStart >= methodLineIdx - 50) {
+            int nonAnnotationLinesSeen = 0;
+            final int ANNOTATION_SCAN_WINDOW = 100;
+            final int ALLOWED_INTERRUPTIONS = 5;  // Allow up to 5 non-annotation lines before stopping
+
+            while (annoStart >= 0 && annoStart >= methodLineIdx - ANNOTATION_SCAN_WINDOW && nonAnnotationLinesSeen < ALLOWED_INTERRUPTIONS) {
                 String l = lines[annoStart].trim();
                 debug("[DEBUG] extractControllerEndpoints: scanning line " + (annoStart+1) + ": '" + l + "'");
                 if (l.isEmpty()) {
@@ -655,17 +661,20 @@ public class ImpactAnalyzer {
                 }
                 if (l.startsWith("@")) {
                     lastAnnotationLine = annoStart;
+                    nonAnnotationLinesSeen = 0;  // Reset counter when we find an annotation
                     debug("[DEBUG] extractControllerEndpoints: found annotation at line " + (annoStart+1));
                     annoStart--;
                     continue;
                 }
-                if (l.contains("=") || l.endsWith(")") || l.endsWith(",")) {
+                if (l.contains("=") || l.endsWith(")") || l.endsWith(",") || l.startsWith("*")) {
                     debug("[DEBUG] extractControllerEndpoints: treating line " + (annoStart+1) + " as annotation continuation");
                     annoStart--;
                     continue;
                 }
-                debug("[DEBUG] extractControllerEndpoints: stopping backward scan at line " + (annoStart+1) + " (non-annotation, non-empty)");
-                break;
+                // Non-annotation, non-continuation line — allow a few of these (Javadoc, comments, etc.)
+                nonAnnotationLinesSeen++;
+                debug("[DEBUG] extractControllerEndpoints: non-annotation line at " + (annoStart+1) + " (count=" + nonAnnotationLinesSeen + ")");
+                annoStart--;
             }
             if (lastAnnotationLine >= 0) {
                 annoStart = lastAnnotationLine;

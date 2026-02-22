@@ -228,6 +228,52 @@ public class JavaSymbolIndex {
                     && isSameModule(candidate.path, target.path)) return true;
         }
 
+        // Enhancement: detect @Autowired/@Inject field/param types and match against target's supertypes.
+        // Handles the case where candidate injects target via an interface, possibly through inheritance.
+        // Example: Controller extends BaseController; BaseController has @Autowired IUserService service;
+        // This makes Controller depend on UserServiceImpl even though Controller doesn't directly import anything.
+        return hasAutowiredDependencyOn(content, target);
+    }
+
+    /**
+     * Detects if {@code content} has @Autowired/@Inject fields/parameters typed as
+     * (or implementing) one of {@code target}'s supertypes.
+     *
+     * Example: if target is UserServiceImpl with supertypes=[IUserService],
+     * and content has @Autowired IUserService service; then returns true.
+     * This is particularly important for base classes that inject interfaces,
+     * and subclasses that inherit those injections.
+     */
+    private static boolean hasAutowiredDependencyOn(String content, ClassInfo target) {
+        if (target == null || target.supertypeSimpleNames.isEmpty()) {
+            return false;
+        }
+
+        // Match @Autowired/@Inject with the following field/param declaration
+        // Captures the field/param type name. Handles multi-line declarations.
+        // Pattern: @Autowired/@Inject (optional whitespace/newlines) type(possibly qualified) fieldName
+        Pattern autowiredPattern = Pattern.compile(
+            "@(?:Autowired|Inject)\\b[\\s\\n]*(?:(?:\\((?:[^)]*)\\)\\s*)?)*[\\s\\n]*" +
+            "([\\w\\.]+)(?:<[^>]*>)?\\s+\\w+\\b",
+            Pattern.MULTILINE
+        );
+
+        Matcher matcher = autowiredPattern.matcher(content);
+        while (matcher.find()) {
+            String fieldType = matcher.group(1);
+            // Extract simple name (last component after dots)
+            String fieldTypeSimple = fieldType.contains(".")
+                ? fieldType.substring(fieldType.lastIndexOf('.') + 1)
+                : fieldType;
+
+            // Check if this field type matches any of target's supertypes (interfaces/superclass)
+            for (String supertype : target.supertypeSimpleNames) {
+                if (fieldTypeSimple.equals(supertype)) {
+                    return true;
+                }
+            }
+        }
+
         return false;
     }
 
