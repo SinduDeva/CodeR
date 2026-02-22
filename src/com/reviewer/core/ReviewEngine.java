@@ -559,7 +559,15 @@ public class ReviewEngine {
 
                     if (controllerEndpoints != null) endpoints.addAll(controllerEndpoints);
                 } else {
-                    if (!visitedFqns.add(depInfo.fqn)) {
+                    // Key by (fqn + sorted touched methods) so the same class can be re-enqueued
+                    // when reached via a different call path carrying different methods.
+                    // E.g., if ClassA is reachable via methodX (path 1) AND methodY (path 2),
+                    // both paths must be explored or we lose the endpoints reachable via path 2.
+                    // The depth limit is the cycle-guard; the FQN-only key was too coarse.
+                    List<String> sortedMethods = new java.util.ArrayList<>(callingMethods);
+                    java.util.Collections.sort(sortedMethods);
+                    String fqnMethodsKey = depInfo.fqn + "|" + sortedMethods;
+                    if (!visitedFqns.add(fqnMethodsKey)) {
                         continue;
                     }
                     queue.add(new TransitiveNode(depInfo.fqn, callingMethods, node.depth + 1, depInfo.supertypeSimpleNames));

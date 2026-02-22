@@ -888,6 +888,12 @@ public class ImpactAnalyzer {
             Pattern assignNew = Pattern.compile("\\b" + Pattern.quote(q) + "\\b\\s*=\\s*new\\s+" + Pattern.quote(t) + "\\b");
             if (assignNew.matcher(content).find()) return true;
 
+            // No declaration found in this file, but the qualifier may be a field inherited from a parent class
+            // (e.g. `protected ServiceImpl service` declared in a base class).
+            // A lowercase-starting identifier is almost always a field/variable reference, not a class name,
+            // so accept it as plausible rather than silently dropping the call.
+            if (Character.isLowerCase(q.charAt(0))) return true;
+
             return false;
         }
 

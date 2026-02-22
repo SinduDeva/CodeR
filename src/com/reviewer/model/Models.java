@@ -157,7 +157,7 @@ public class Models {
         public boolean openReport = false;
         public boolean debug = false;
         public boolean enableTransitiveApiDiscovery = true;
-        public int transitiveApiDiscoveryMaxDepth = 3;
+        public int transitiveApiDiscoveryMaxDepth = 6;
         public int transitiveApiDiscoveryMaxVisitedFiles = 30;
         public int transitiveApiDiscoveryMaxControllers = 5;
         public String primaryModel = "gpt-5.1-codex";
