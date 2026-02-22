@@ -98,6 +98,16 @@ public class JavaSymbolIndex {
             graph.putIfAbsent(target.fqn, new LinkedHashSet<>());
         }
 
+        // Pre-resolve each target's supertypes through the index so that dependsOn() can
+        // use the interface's actual package rather than the implementation's package.
+        // Example: HelperImpl (com.example.impl) implements IHelper (com.example.service).
+        // A caller that imports com.example.service.IHelper was previously missed because
+        // the check used "com.example.impl.IHelper" as the expected import.
+        Map<String, Map<String, Set<ClassInfo>>> resolvedSupertypesPerTarget = new HashMap<>();
+        for (ClassInfo target : targets) {
+            resolvedSupertypesPerTarget.put(target.fqn, resolveSupertypes(target));
+        }
+
         for (ClassInfo candidate : classesByPath.values()) {
             String content;
             String cacheKey = candidate.path.toString();
@@ -115,13 +125,29 @@ public class JavaSymbolIndex {
             Imports imports = parseImports(content);
             for (ClassInfo target : targets) {
                 boolean unique = isSimpleNameUnique(target.simpleName);
-                if (dependsOn(content, imports, candidate, target, unique)) {
+                Map<String, Set<ClassInfo>> resolvedSupertypes = resolvedSupertypesPerTarget.get(target.fqn);
+                if (dependsOn(content, imports, candidate, target, unique, resolvedSupertypes)) {
                     graph.computeIfAbsent(target.fqn, k -> new LinkedHashSet<>()).add(candidate.path.toString());
                 }
             }
         }
 
         return graph;
+    }
+
+    /**
+     * Resolves each direct supertype simple name of {@code target} to the matching
+     * {@link ClassInfo}(s) in the index.  The result is keyed by simple name and may
+     * contain multiple entries when simple names are ambiguous across packages.
+     */
+    private Map<String, Set<ClassInfo>> resolveSupertypes(ClassInfo target) {
+        if (target.supertypeSimpleNames.isEmpty()) return Collections.emptyMap();
+        Map<String, Set<ClassInfo>> result = new LinkedHashMap<>();
+        for (String name : target.supertypeSimpleNames) {
+            Set<ClassInfo> found = classesBySimpleName.getOrDefault(name, Collections.emptySet());
+            if (!found.isEmpty()) result.put(name, found);
+        }
+        return result;
     }
 
     public static Optional<ClassInfo> parseClassInfo(Path path) throws IOException {
@@ -206,6 +232,19 @@ public class JavaSymbolIndex {
     }
 
     public static boolean dependsOn(String content, Imports imports, ClassInfo candidate, ClassInfo target, boolean simpleNameUnique) {
+        return dependsOn(content, imports, candidate, target, simpleNameUnique, null);
+    }
+
+    /**
+     * Returns true when {@code candidate} directly or indirectly references {@code target}.
+     *
+     * @param resolvedSupertypes optional map of supertype simple name → index-resolved ClassInfo set;
+     *                           when provided the check uses each supertype's real package/FQN rather
+     *                           than the implementation class's package, correctly handling the common
+     *                           case where an interface lives in a different package from its impl.
+     */
+    static boolean dependsOn(String content, Imports imports, ClassInfo candidate, ClassInfo target,
+                              boolean simpleNameUnique, Map<String, Set<ClassInfo>> resolvedSupertypes) {
         if (candidate == null || target == null) return false;
         if (candidate.fqn.equals(target.fqn)) return false;
 
@@ -220,12 +259,30 @@ public class JavaSymbolIndex {
         // file is UserServiceImpl.  The candidate imports the interface, not the implementation.
         for (String supertype : target.supertypeSimpleNames) {
             if (!containsToken(content, supertype)) continue;
-            // Require that the reference plausibly points to the same package as the target.
-            if (imports.hasExplicit(target.packageName + "." + supertype)) return true;
-            if (imports.hasWildcard(target.packageName)) return true;
-            if (!target.packageName.isEmpty()
-                    && candidate.packageName.equals(target.packageName)
-                    && isSameModule(candidate.path, target.path)) return true;
+
+            // Use the index-resolved ClassInfo(s) for the supertype when available so the import
+            // check uses the interface's actual package — not the implementation's package.
+            Set<ClassInfo> supertypeInfos = (resolvedSupertypes != null)
+                    ? resolvedSupertypes.getOrDefault(supertype, Collections.emptySet())
+                    : Collections.emptySet();
+
+            if (!supertypeInfos.isEmpty()) {
+                for (ClassInfo si : supertypeInfos) {
+                    if (imports.hasExplicit(si.fqn)) return true;
+                    if (imports.hasWildcard(si.packageName)) return true;
+                    if (!si.packageName.isEmpty()
+                            && candidate.packageName.equals(si.packageName)
+                            && isSameModule(candidate.path, si.path)) return true;
+                }
+            } else {
+                // Fallback when the supertype is not in the index (e.g. external library):
+                // use the target's own package as a best-effort approximation.
+                if (imports.hasExplicit(target.packageName + "." + supertype)) return true;
+                if (imports.hasWildcard(target.packageName)) return true;
+                if (!target.packageName.isEmpty()
+                        && candidate.packageName.equals(target.packageName)
+                        && isSameModule(candidate.path, target.path)) return true;
+            }
         }
 
         // Enhancement: detect @Autowired/@Inject field/param types and match against target's supertypes.

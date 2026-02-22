@@ -722,9 +722,10 @@ public class ReviewEngine {
             }
             if (!Files.exists(GRAPH_CACHE)) return null;
             List<String> lines = Files.readAllLines(GRAPH_CACHE, java.nio.charset.StandardCharsets.UTF_8);
-            // V=2 format: line 0 = V=2, line 1 = TS=<epoch-ms>, line 2 = KEY=..., lines 3+ = DEP=...
+            // V=3 format: line 0 = V=3, line 1 = TS=<epoch-ms>, line 2 = KEY=..., lines 3+ = DEP=...
+            // (V=2 caches used the wrong package for interface supertypes and must be discarded.)
             if (lines.size() < 3) return null;
-            if (!"V=2".equals(lines.get(0))) return null;
+            if (!"V=3".equals(lines.get(0))) return null;
 
             String tsLine = lines.get(1);
             if (!tsLine.startsWith("TS=")) return null;
@@ -767,7 +768,7 @@ public class ReviewEngine {
         try {
             Files.createDirectories(CACHE_DIR);
             StringBuilder sb = new StringBuilder();
-            sb.append("V=2\n");
+            sb.append("V=3\n");
             sb.append("TS=").append(System.currentTimeMillis()).append('\n');
             sb.append("KEY=").append(buildCacheKey(changedFiles)).append('\n');
             for (Map.Entry<String, Set<String>> entry : graph.entrySet()) {
