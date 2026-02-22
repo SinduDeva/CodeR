@@ -716,16 +716,30 @@ public class ReviewEngine {
      */
     private Map<String, Set<String>> tryLoadGraphCache(List<ChangedFile> changedFiles) {
         try {
+            if (config.rebuildGraphCache) {
+                debug("Graph cache rebuild forced via flag — skipping cache.");
+                return null;
+            }
             if (!Files.exists(GRAPH_CACHE)) return null;
             List<String> lines = Files.readAllLines(GRAPH_CACHE, java.nio.charset.StandardCharsets.UTF_8);
-            if (lines.size() < 2) return null;
-            if (!"V=1".equals(lines.get(0))) return null;
+            // V=2 format: line 0 = V=2, line 1 = TS=<epoch-ms>, line 2 = KEY=..., lines 3+ = DEP=...
+            if (lines.size() < 3) return null;
+            if (!"V=2".equals(lines.get(0))) return null;
+
+            String tsLine = lines.get(1);
+            if (!tsLine.startsWith("TS=")) return null;
+            long cachedAt = Long.parseLong(tsLine.substring(3));
+            long ttlMs = (long) config.graphCacheTtlHours * 3_600_000L;
+            if (System.currentTimeMillis() - cachedAt > ttlMs) {
+                debug("Graph cache expired (age > " + config.graphCacheTtlHours + "h) — rebuilding.");
+                return null;
+            }
 
             String expectedKey = "KEY=" + buildCacheKey(changedFiles);
-            if (!expectedKey.equals(lines.get(1))) return null;
+            if (!expectedKey.equals(lines.get(2))) return null;
 
             Map<String, Set<String>> graph = new LinkedHashMap<>();
-            for (int i = 2; i < lines.size(); i++) {
+            for (int i = 3; i < lines.size(); i++) {
                 String line = lines.get(i);
                 if (!line.startsWith("DEP=")) continue;
                 String rest = line.substring(4);
@@ -753,7 +767,8 @@ public class ReviewEngine {
         try {
             Files.createDirectories(CACHE_DIR);
             StringBuilder sb = new StringBuilder();
-            sb.append("V=1\n");
+            sb.append("V=2\n");
+            sb.append("TS=").append(System.currentTimeMillis()).append('\n');
             sb.append("KEY=").append(buildCacheKey(changedFiles)).append('\n');
             for (Map.Entry<String, Set<String>> entry : graph.entrySet()) {
                 sb.append("DEP=").append(entry.getKey()).append('=');
@@ -761,7 +776,7 @@ public class ReviewEngine {
                 sb.append('\n');
             }
             Files.writeString(GRAPH_CACHE, sb.toString(), java.nio.charset.StandardCharsets.UTF_8);
-            debug("Graph cache saved.");
+            debug("Graph cache saved (TTL=" + config.graphCacheTtlHours + "h).");
         } catch (Exception e) {
             debug("Graph cache save failed: " + e.getMessage());
         }

@@ -25,10 +25,18 @@ public class Main {
                 System.exit(0);
             } else {
                 for (String arg : args) {
-                    Path p = Paths.get(arg);
-                    if (Files.exists(p)) {
-                        files.add(new ChangedFile(p.toString(), p.getFileName().toString(), Collections.emptySet()));
+                    if (arg.equals("--rebuild-graph")) {
+                        config.rebuildGraphCache = true;
+                    } else {
+                        Path p = Paths.get(arg);
+                        if (Files.exists(p)) {
+                            files.add(new ChangedFile(p.toString(), p.getFileName().toString(), Collections.emptySet()));
+                        }
                     }
+                }
+                // --rebuild-graph alone: still analyse staged files
+                if (files.isEmpty()) {
+                    files = engine.getStagedFiles();
                 }
             }
 
@@ -124,6 +132,8 @@ public class Main {
         config.pmdRulesetPath = props.getProperty("pmd.ruleset.path", config.pmdRulesetPath);
         config.javaSourceVersion = Integer.parseInt(props.getProperty("java.source.version", String.valueOf(config.javaSourceVersion)));
         config.methodScopedDependencyGraph = Boolean.parseBoolean(props.getProperty("dependency.graph.scope.method", String.valueOf(config.methodScopedDependencyGraph)));
+        config.rebuildGraphCache = Boolean.parseBoolean(props.getProperty("rebuild.graph.cache", String.valueOf(config.rebuildGraphCache)));
+        config.graphCacheTtlHours = Integer.parseInt(props.getProperty("graph.cache.ttl.hours", String.valueOf(config.graphCacheTtlHours)));
     }
 
     private static void openReport(String reportPath) {

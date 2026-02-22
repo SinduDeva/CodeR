@@ -177,5 +177,18 @@ public class Models {
          * Falls back to class-level automatically when no method-scoped dependents were found.
          */
         public boolean methodScopedDependencyGraph = true;
+        /**
+         * When true, discards the on-disk dependency graph cache and rebuilds it from scratch.
+         * Equivalent to passing {@code --rebuild-graph} on the command line.
+         */
+        public boolean rebuildGraphCache = false;
+        /**
+         * Maximum age of the on-disk dependency graph cache in hours.
+         * Once the cache is older than this threshold it is discarded and rebuilt.
+         * 12 hours is the default — long enough to survive a normal working session
+         * without rebuilding on every commit, short enough to pick up structural
+         * refactors done earlier in the same day.
+         */
+        public int graphCacheTtlHours = 12;
     }
 }
