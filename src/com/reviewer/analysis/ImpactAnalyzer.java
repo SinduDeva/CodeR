@@ -216,6 +216,7 @@ public class ImpactAnalyzer {
         }
 
         boolean hasAnyTouchedToken = false;
+        String matchedToken = null;
         for (String method : touchedMethods) {
             String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
             if (!isValidMethodName(pureMethodName)) {
@@ -225,12 +226,15 @@ public class ImpactAnalyzer {
                 content.contains("." + pureMethodName + "(") ||
                 content.contains("::" + pureMethodName)) {
                 hasAnyTouchedToken = true;
+                matchedToken = pureMethodName;
                 break;
             }
         }
         if (!hasAnyTouchedToken) {
+            debug("[DEBUG] getMethodsCallingImpl: no touched method tokens found. targetSimpleName=" + targetSimpleName + ", touchedMethods=" + touchedMethods);
             return Collections.emptyList();
         }
+        debug("[DEBUG] getMethodsCallingImpl: found token '" + matchedToken + "' in content, targetSimpleName=" + targetSimpleName);
 
         Set<String> callers = new HashSet<>();
 
@@ -371,7 +375,9 @@ public class ImpactAnalyzer {
         // Also run when hasAnyTouchedToken=true: even if the type isn't directly referenced in the file,
         // if the file contains calls to the touched methods, they're likely inherited from a parent class
         // and we should still try to find which methods in this file make those calls.
-        if (callers.isEmpty() && (isLikelyTargetReferencedInFile(content, targetSimpleName, targetFqn) || hasAnyTouchedToken)) {
+        boolean likelyRef = isLikelyTargetReferencedInFile(content, targetSimpleName, targetFqn);
+        if (callers.isEmpty() && (likelyRef || hasAnyTouchedToken)) {
+            debug("[DEBUG] step 4b: running (likelyRef=" + likelyRef + ", hasAnyTouchedToken=" + hasAnyTouchedToken + ") for target=" + targetSimpleName);
             for (String method : touchedMethods) {
                 String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
                 if (!isValidMethodName(pureMethodName)) {
@@ -379,14 +385,21 @@ public class ImpactAnalyzer {
                 }
                 String anyQualifierCallPattern = "\\b(\\w+)\\s*\\.\\s*" + Pattern.quote(pureMethodName) + "\\b\\s*\\(";
                 Matcher aqm = Pattern.compile(anyQualifierCallPattern).matcher(content);
+                int matchCount = 0;
                 while (aqm.find()) {
+                    matchCount++;
                     String qualifier = aqm.group(1);
                     if (!isPlausibleQualifierIdentifier(content, qualifier, targetSimpleName)) {
+                        debug("[DEBUG] step 4b: skipping qualifier '" + qualifier + "' (not plausible)");
                         continue;
                     }
                     int callPos = aqm.start();
                     String enclosing = findEnclosingMethod(methodsInFile, callPos);
+                    debug("[DEBUG] step 4b: found " + qualifier + "." + pureMethodName + " at position " + callPos + ", enclosing method: " + enclosing);
                     if (enclosing != null) callers.add(enclosing);
+                }
+                if (matchCount > 0) {
+                    debug("[DEBUG] step 4b: pattern '" + anyQualifierCallPattern + "' found " + matchCount + " matches for method " + pureMethodName);
                 }
 
                 String anyQualifierRefPattern = "\\b(\\w+)\\s*::\\s*" + Pattern.quote(pureMethodName) + "\\b";
@@ -401,6 +414,7 @@ public class ImpactAnalyzer {
                     if (enclosing != null) callers.add(enclosing);
                 }
             }
+            debug("[DEBUG] step 4b: found " + callers.size() + " callers for target " + targetSimpleName);
         }
 
         // 5. Unqualified calls: method(...) when statically imported from targetFqn
