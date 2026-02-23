@@ -523,6 +523,22 @@ public class ReviewEngine {
                 List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, currentSimpleName, node.fqn, node.supertypeSimpleNames, node.impactedMethods, false);
                 callingMethods = ImpactAnalyzer.filterValidMethodNames(callingMethods);
                 debug("Transitive: found calling methods in " + depFileName + ": " + callingMethods);
+
+                // Structural fallback: when the touched-method token is absent (call hidden
+                // behind a delegate, lambda, proxy, or chained expression), use the
+                // instance-level scanner to find every method that calls ANY method on the
+                // target type.  This is broader than the token search but ensures the BFS
+                // reaches all real dependents regardless of call-site shape.
+                if (callingMethods.isEmpty()) {
+                    List<String> structural = ImpactAnalyzer.getMethodsUsingTarget(
+                            depContent, currentSimpleName, node.fqn, node.supertypeSimpleNames);
+                    structural = ImpactAnalyzer.filterValidMethodNames(structural);
+                    if (!structural.isEmpty()) {
+                        debug("Transitive: structural scan found callers in " + depFileName + ": " + structural);
+                        callingMethods = structural;
+                    }
+                }
+
                 if (callingMethods.isEmpty()) {
                     continue;
                 }

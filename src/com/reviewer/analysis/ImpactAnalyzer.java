@@ -231,20 +231,21 @@ public class ImpactAnalyzer {
             }
         }
         if (!hasAnyTouchedToken) {
-            // Before giving up, check if the target class/interface is referenced at all.
-            // If yes, step 4b below may still find callers via qualified-call patterns
-            // (e.g. the file declares a field typed as the target's interface, and calls a method
-            // that is NOT in touchedMethods but belongs to the same target class).
-            // This matters for structural dependents found via interface-injection in the graph.
-            boolean likelyRefForEarlyCheck = isLikelyTargetReferencedInFile(content, targetSimpleName, targetFqn);
-            if (!likelyRefForEarlyCheck) {
-                debug("[DEBUG] getMethodsCallingImpl: no touched method tokens AND no target reference. targetSimpleName=" + targetSimpleName + ", touchedMethods=" + touchedMethods);
+            // Touched-method tokens not found — the call is hidden behind a delegate, proxy,
+            // lambda, or chained expression.  Run the structural scan instead:
+            // find every method in this file that calls ANY method on the target's instances.
+            // This does not rely on the specific touched-method name appearing literally.
+            boolean likelyRef = isLikelyTargetReferencedInFile(content, targetSimpleName, targetFqn);
+            if (!likelyRef) {
+                debug("[DEBUG] getMethodsCallingImpl: no tokens, no reference — skipping. target=" + targetSimpleName);
                 return Collections.emptyList();
             }
-            debug("[DEBUG] getMethodsCallingImpl: no touched method tokens but target IS referenced in file. Will fall through to step 4b. targetSimpleName=" + targetSimpleName + ", touchedMethods=" + touchedMethods);
-        } else {
-            debug("[DEBUG] getMethodsCallingImpl: found token '" + matchedToken + "' in content, targetSimpleName=" + targetSimpleName);
+            debug("[DEBUG] getMethodsCallingImpl: no touched tokens but target IS referenced. Running structural scan. target=" + targetSimpleName);
+            List<String> structural = getMethodsUsingTarget(content, targetSimpleName, targetFqn, supertypeSimpleNames);
+            debug("[DEBUG] getMethodsCallingImpl: structural scan found " + structural.size() + " callers for target=" + targetSimpleName + ": " + structural);
+            return structural;
         }
+        debug("[DEBUG] getMethodsCallingImpl: found token '" + matchedToken + "' in content, targetSimpleName=" + targetSimpleName);
 
         Set<String> callers = new HashSet<>();
 
@@ -258,43 +259,7 @@ public class ImpactAnalyzer {
         }
 
         // 2. Identify all method boundaries in the current file accurately
-        List<MethodSpan> methodsInFile = new ArrayList<>();
-        Pattern methodDeclPattern = Pattern.compile("(?s)(?:public|protected|private|static|final|\\s)+\\s*(?:<[^>]+>\\s+)?(?:[\\w\\<\\>\\[\\]\\.]+)\\s+(\\w+)\\s*\\(");
-        Matcher mm = methodDeclPattern.matcher(content);
-        while (mm.find()) {
-            String name = mm.group(1);
-            int paramStart = mm.end() - 1;
-            
-            // Find matching closing parenthesis for parameters (handles nested parens in annotations)
-            int depth = 1;
-            int i = paramStart + 1;
-            while (i < content.length() && depth > 0) {
-                char c = content.charAt(i);
-                if (c == '(') depth++;
-                else if (c == ')') depth--;
-                i++;
-            }
-            if (depth != 0) continue; // Unmatched parentheses
-            
-            // Now find the opening brace
-            int bodyStartBrace = -1;
-            for (int j = i; j < content.length(); j++) {
-                char c = content.charAt(j);
-                if (c == '{') {
-                    bodyStartBrace = j;
-                    break;
-                }
-                if (c != ' ' && c != '\t' && c != '\n' && c != '\r' && !Character.isJavaIdentifierPart(c) && c != ',' && c != '.') {
-                    break; // Not a method declaration
-                }
-            }
-            if (bodyStartBrace < 0) continue;
-            
-            int bodyEndExclusive = findMatchingBrace(content, bodyStartBrace);
-            if (bodyEndExclusive > bodyStartBrace) {
-                methodsInFile.add(new MethodSpan(mm.start(), bodyEndExclusive, name));
-            }
-        }
+        List<MethodSpan> methodsInFile = buildMethodSpans(content);
 
         // 3. Check whether touched methods can be called unqualified due to static import
         boolean staticImportAll = false;
@@ -572,6 +537,100 @@ public class ImpactAnalyzer {
             backslashCount++;
         }
         return (backslashCount & 1) == 1;
+    }
+
+    /**
+     * Parses {@code content} to find every method declaration's span [headerStart, bodyEnd).
+     * Used by both token-based and structural call-site finders to locate enclosing methods.
+     */
+    static List<MethodSpan> buildMethodSpans(String content) {
+        List<MethodSpan> spans = new ArrayList<>();
+        if (content == null || content.isBlank()) return spans;
+        Pattern methodDeclPattern = Pattern.compile(
+            "(?s)(?:public|protected|private|static|final|\\s)+\\s*(?:<[^>]+>\\s+)?(?:[\\w\\<\\>\\[\\]\\.]+)\\s+(\\w+)\\s*\\(");
+        Matcher mm = methodDeclPattern.matcher(content);
+        while (mm.find()) {
+            String name = mm.group(1);
+            int paramStart = mm.end() - 1;
+            // Skip past parameter list
+            int depth = 1;
+            int i = paramStart + 1;
+            while (i < content.length() && depth > 0) {
+                char c = content.charAt(i);
+                if (c == '(') depth++;
+                else if (c == ')') depth--;
+                i++;
+            }
+            if (depth != 0) continue;
+            // Find the opening body brace
+            int bodyStartBrace = -1;
+            for (int j = i; j < content.length(); j++) {
+                char c = content.charAt(j);
+                if (c == '{') { bodyStartBrace = j; break; }
+                if (c != ' ' && c != '\t' && c != '\n' && c != '\r'
+                        && !Character.isJavaIdentifierPart(c) && c != ',' && c != '.'
+                        && c != '<' && c != '>' && c != '[' && c != ']') break;
+            }
+            if (bodyStartBrace < 0) continue;
+            int bodyEndExclusive = findMatchingBrace(content, bodyStartBrace);
+            if (bodyEndExclusive > bodyStartBrace) {
+                spans.add(new MethodSpan(mm.start(), bodyEndExclusive, name));
+            }
+        }
+        return spans;
+    }
+
+    /**
+     * Structural caller discovery: finds every method in {@code content} that makes
+     * <em>any</em> method call on a field or variable typed as the target class or one
+     * of its supertypes (interfaces/superclass).  Unlike {@link #getMethodsCallingImpl},
+     * this does NOT require knowing which specific methods were touched — it returns
+     * every method that interacts with the target type at all.
+     *
+     * <p>This is the primary mechanism when string-token matching fails (chained calls
+     * like {@code factory.get().method()}, lambda captures, interface proxies, Spring
+     * delegates, etc.) because the touched-method name simply does not appear literally
+     * in the dependent file's source.
+     *
+     * @return distinct names of methods whose bodies contain at least one
+     *         {@code instance.anyMethod(} or {@code instance::anyMethod} expression
+     *         on an instance of the target type
+     */
+    public static List<String> getMethodsUsingTarget(
+            String content, String targetSimpleName, String targetFqn,
+            List<String> supertypeSimpleNames) {
+        if (content == null || content.isBlank()) return Collections.emptyList();
+        Set<String> instanceNames = extractInstanceNames(content, targetSimpleName, targetFqn, supertypeSimpleNames);
+        // Also include the class name itself for static call sites (TargetClass.staticMethod(...))
+        if (targetSimpleName != null && !targetSimpleName.isBlank()) instanceNames.add(targetSimpleName.trim());
+        if (instanceNames.isEmpty()) return Collections.emptyList();
+
+        List<MethodSpan> spans = buildMethodSpans(content);
+        Set<String> callers = new LinkedHashSet<>();
+
+        for (String inst : instanceNames) {
+            if (inst == null || inst.isBlank()) continue;
+            // Dot-call: instance.anyMethod(
+            Pattern dotCall = Pattern.compile("\\b" + Pattern.quote(inst) + "\\s*\\.\\s*(\\w+)\\s*\\(");
+            Matcher dc = dotCall.matcher(content);
+            while (dc.find()) {
+                String enclosing = findEnclosingMethod(spans, dc.start());
+                if (enclosing != null) {
+                    debug("[DEBUG] getMethodsUsingTarget: " + inst + "." + dc.group(1) + "() in method " + enclosing);
+                    callers.add(enclosing);
+                }
+            }
+            // Method reference: instance::anyMethod
+            Pattern ref = Pattern.compile("\\b" + Pattern.quote(inst) + "\\s*::\\s*(\\w+)\\b");
+            Matcher rm = ref.matcher(content);
+            while (rm.find()) {
+                String enclosing = findEnclosingMethod(spans, rm.start());
+                if (enclosing != null) callers.add(enclosing);
+            }
+        }
+        debug("[DEBUG] getMethodsUsingTarget: target=" + targetSimpleName
+                + " instances=" + instanceNames + " callers=" + callers);
+        return new ArrayList<>(callers);
     }
 
     private static Set<String> extractInstanceNames(String content, String targetSimpleName, String targetFqn,
