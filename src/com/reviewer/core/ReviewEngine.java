@@ -441,12 +441,14 @@ public class ReviewEngine {
                 if (config.enableTransitiveApiDiscovery && !isController && !touchedMethods.isEmpty()) {
                     debug("Attempting transitive controller discovery for " + classInfo.fqn);
                     Set<String> existingEndpoints = new HashSet<>(entry.endpoints);
+                    List<String> callChainNotes = new ArrayList<>();
                     List<String> transitiveEndpoints = discoverTransitiveControllerEndpoints(
                             classInfo,
                             touchedMethods,
                             config.transitiveApiDiscoveryMaxDepth,
                             config.transitiveApiDiscoveryMaxVisitedFiles,
-                            config.transitiveApiDiscoveryMaxControllers
+                            config.transitiveApiDiscoveryMaxControllers,
+                            callChainNotes
                     );
                     if (!transitiveEndpoints.isEmpty()) {
                         if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
@@ -456,6 +458,9 @@ public class ReviewEngine {
                             }
                         }
                     }
+                    // Always surface the verified call-graph hops as notes so the developer
+                    // can see how far impact propagates even when no endpoint is reached.
+                    entry.notes.addAll(callChainNotes);
                 }
                 if (entry.hasSignal()) impact.add(entry);
             } catch (IOException ignored) {}
@@ -463,7 +468,7 @@ public class ReviewEngine {
         return impact;
     }
 
-    private List<String> discoverTransitiveControllerEndpoints(JavaSymbolIndex.ClassInfo startClass, List<String> initialTouchedMethods, int maxDepth, int maxVisitedFiles, int maxControllers) {
+    private List<String> discoverTransitiveControllerEndpoints(JavaSymbolIndex.ClassInfo startClass, List<String> initialTouchedMethods, int maxDepth, int maxVisitedFiles, int maxControllers, List<String> outCallChainNotes) {
         if (startClass == null || reverseDependencyGraph == null || reverseDependencyGraph.isEmpty()) {
             return Collections.emptyList();
         }
@@ -520,12 +525,11 @@ public class ReviewEngine {
                 }
 
                 // Only traverse/record endpoints if we can prove a call chain to the impacted methods.
-                // For transitive discovery, pass confirmedDependent=true to enable structural fallback
-                // even when literal method names don't appear. This allows the BFS to discover
-                // intermediate helpers/utilities that depend on the target but call other methods.
+                // Token-based steps (1-4c) run first; structural fallback (step 6) only fires when
+                // transitive.caller.structural.fallback=true in the properties file.
                 String currentSimpleName = simpleNameFromFqn(node.fqn);
                 debug("Transitive: checking " + depFileName + " for calls to " + currentSimpleName + "." + node.impactedMethods);
-                List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, currentSimpleName, node.fqn, node.supertypeSimpleNames, node.impactedMethods, false, true);
+                List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, currentSimpleName, node.fqn, node.supertypeSimpleNames, node.impactedMethods, false);
                 callingMethods = ImpactAnalyzer.filterValidMethodNames(callingMethods);
                 debug("Transitive: found calling methods in " + depFileName + ": " + callingMethods);
 
@@ -576,6 +580,16 @@ public class ReviewEngine {
                     if (!visitedFqns.add(fqnMethodsKey)) {
                         continue;
                     }
+                    // Record this hop in the call chain regardless of whether it reaches an endpoint.
+                    // The reverse graph confirmed it depends on the target; the token search confirmed
+                    // it calls the touched methods — so it is a real, verified hop in the impact path.
+                    String methodSummary = callingMethods.size() == 1
+                            ? callingMethods.get(0) + "()"
+                            : callingMethods.subList(0, Math.min(2, callingMethods.size()))
+                                    .stream().map(m -> m + "()").collect(Collectors.joining(", "))
+                              + (callingMethods.size() > 2 ? ", +" + (callingMethods.size() - 2) + " more" : "");
+                    outCallChainNotes.add("Transitive caller [depth " + (node.depth + 1) + "]: "
+                            + depInfo.simpleName + "." + methodSummary);
                     queue.add(new TransitiveNode(depInfo.fqn, callingMethods, node.depth + 1, depInfo.supertypeSimpleNames));
                 }
             }
