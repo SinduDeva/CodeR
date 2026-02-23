@@ -368,7 +368,10 @@ public class ImpactAnalyzer {
         // 4b. Fallback qualified calls: *.method(...)
         // This helps when the target is referenced via an interface/supertype (instance name extraction may fail),
         // or when the call appears inside lambdas/streams but still uses dot-call syntax.
-        if (callers.isEmpty() && isLikelyTargetReferencedInFile(content, targetSimpleName, targetFqn)) {
+        // Also run when hasAnyTouchedToken=true: even if the type isn't directly referenced in the file,
+        // if the file contains calls to the touched methods, they're likely inherited from a parent class
+        // and we should still try to find which methods in this file make those calls.
+        if (callers.isEmpty() && (isLikelyTargetReferencedInFile(content, targetSimpleName, targetFqn) || hasAnyTouchedToken)) {
             for (String method : touchedMethods) {
                 String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
                 if (!isValidMethodName(pureMethodName)) {
