@@ -518,26 +518,14 @@ public class ReviewEngine {
                 }
 
                 // Only traverse/record endpoints if we can prove a call chain to the impacted methods.
+                // getMethodsCalling runs token-based steps first (1-4c), then falls through to
+                // the structural instance-level scan (step 6) if all token steps fail.
+                // A single call covers all cases; no second pass needed.
                 String currentSimpleName = simpleNameFromFqn(node.fqn);
                 debug("Transitive: checking " + depFileName + " for calls to " + currentSimpleName + "." + node.impactedMethods);
                 List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, currentSimpleName, node.fqn, node.supertypeSimpleNames, node.impactedMethods, false);
                 callingMethods = ImpactAnalyzer.filterValidMethodNames(callingMethods);
                 debug("Transitive: found calling methods in " + depFileName + ": " + callingMethods);
-
-                // Structural fallback: when the touched-method token is absent (call hidden
-                // behind a delegate, lambda, proxy, or chained expression), use the
-                // instance-level scanner to find every method that calls ANY method on the
-                // target type.  This is broader than the token search but ensures the BFS
-                // reaches all real dependents regardless of call-site shape.
-                if (callingMethods.isEmpty()) {
-                    List<String> structural = ImpactAnalyzer.getMethodsUsingTarget(
-                            depContent, currentSimpleName, node.fqn, node.supertypeSimpleNames);
-                    structural = ImpactAnalyzer.filterValidMethodNames(structural);
-                    if (!structural.isEmpty()) {
-                        debug("Transitive: structural scan found callers in " + depFileName + ": " + structural);
-                        callingMethods = structural;
-                    }
-                }
 
                 if (callingMethods.isEmpty()) {
                     continue;

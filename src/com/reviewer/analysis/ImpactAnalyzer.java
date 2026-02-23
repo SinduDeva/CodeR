@@ -418,25 +418,32 @@ public class ImpactAnalyzer {
             debug("[DEBUG] step 4c: found " + callers.size() + " callers");
         }
 
-        // 5. Unqualified calls: method(...) when statically imported from targetFqn
-        if (staticImportAll || !staticallyImportedMethods.isEmpty()) {
-            for (String method : touchedMethods) {
-                String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
-                if (!isValidMethodName(pureMethodName)) {
-                    continue;
+        // 6. Structural fallback: instance-level scan.
+        // Runs when all token/qualifier steps found nothing — typically when the call is
+        // hidden behind a chained expression, lambda, interface proxy, or delegate and
+        // the touched-method name never appears as a simple qualifier.method() pattern.
+        // Reuses the already-computed instanceNames and methodsInFile to avoid redundant work.
+        // Finds every enclosing method that calls ANY method on the target's typed instances.
+        if (callers.isEmpty() && !instanceNames.isEmpty()) {
+            for (String inst : instanceNames) {
+                if (inst == null || inst.isBlank()) continue;
+                Pattern dotCall = Pattern.compile("\\b" + Pattern.quote(inst) + "\\s*\\.\\s*(\\w+)\\s*\\(");
+                Matcher dc = dotCall.matcher(content);
+                while (dc.find()) {
+                    String enclosing = findEnclosingMethod(methodsInFile, dc.start());
+                    if (enclosing != null) {
+                        debug("[DEBUG] step 6 structural: " + inst + "." + dc.group(1) + "() in " + enclosing);
+                        callers.add(enclosing);
+                    }
                 }
-                if (!staticImportAll && !staticallyImportedMethods.contains(pureMethodName)) {
-                    continue;
-                }
-                String unqualifiedPattern = "(?<![\\w\\.])" + Pattern.quote(pureMethodName) + "\\b\\s*\\(";
-                Pattern up = Pattern.compile(unqualifiedPattern);
-                Matcher um = up.matcher(content);
-                while (um.find()) {
-                    int callPos = um.start();
-                    String enclosing = findEnclosingMethod(methodsInFile, callPos);
+                Pattern ref = Pattern.compile("\\b" + Pattern.quote(inst) + "\\s*::\\s*(\\w+)\\b");
+                Matcher rm2 = ref.matcher(content);
+                while (rm2.find()) {
+                    String enclosing = findEnclosingMethod(methodsInFile, rm2.start());
                     if (enclosing != null) callers.add(enclosing);
                 }
             }
+            debug("[DEBUG] step 6 structural: found " + callers.size() + " callers");
         }
 
         return new ArrayList<>(callers);
