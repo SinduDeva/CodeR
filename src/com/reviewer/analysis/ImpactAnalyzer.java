@@ -231,10 +231,20 @@ public class ImpactAnalyzer {
             }
         }
         if (!hasAnyTouchedToken) {
-            debug("[DEBUG] getMethodsCallingImpl: no touched method tokens found. targetSimpleName=" + targetSimpleName + ", touchedMethods=" + touchedMethods);
-            return Collections.emptyList();
+            // Before giving up, check if the target class/interface is referenced at all.
+            // If yes, step 4b below may still find callers via qualified-call patterns
+            // (e.g. the file declares a field typed as the target's interface, and calls a method
+            // that is NOT in touchedMethods but belongs to the same target class).
+            // This matters for structural dependents found via interface-injection in the graph.
+            boolean likelyRefForEarlyCheck = isLikelyTargetReferencedInFile(content, targetSimpleName, targetFqn);
+            if (!likelyRefForEarlyCheck) {
+                debug("[DEBUG] getMethodsCallingImpl: no touched method tokens AND no target reference. targetSimpleName=" + targetSimpleName + ", touchedMethods=" + touchedMethods);
+                return Collections.emptyList();
+            }
+            debug("[DEBUG] getMethodsCallingImpl: no touched method tokens but target IS referenced in file. Will fall through to step 4b. targetSimpleName=" + targetSimpleName + ", touchedMethods=" + touchedMethods);
+        } else {
+            debug("[DEBUG] getMethodsCallingImpl: found token '" + matchedToken + "' in content, targetSimpleName=" + targetSimpleName);
         }
-        debug("[DEBUG] getMethodsCallingImpl: found token '" + matchedToken + "' in content, targetSimpleName=" + targetSimpleName);
 
         Set<String> callers = new HashSet<>();
 
@@ -415,6 +425,32 @@ public class ImpactAnalyzer {
                 }
             }
             debug("[DEBUG] step 4b: found " + callers.size() + " callers for target " + targetSimpleName);
+        }
+
+        // 4c. Raw-token fallback: handles chained calls (factory.get().method(...)), lambdas, and
+        // any other case where steps 1-4b failed to attribute a known touched-method call.
+        // Only runs when we KNOW the method token is present in the file but all qualifier-based
+        // steps came up empty.  findEnclosingMethod returns null for method *declarations*, so
+        // we don't accidentally treat the declaring class as a caller of itself.
+        if (callers.isEmpty() && hasAnyTouchedToken) {
+            debug("[DEBUG] step 4c: raw-token fallback for target=" + targetSimpleName);
+            for (String method : touchedMethods) {
+                String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
+                if (!isValidMethodName(pureMethodName)) continue;
+                Pattern rawCall = Pattern.compile("(?<![\\w\\$])" + Pattern.quote(pureMethodName) + "\\s*\\(");
+                Matcher rm = rawCall.matcher(content);
+                while (rm.find()) {
+                    int callPos = rm.start();
+                    String enclosing = findEnclosingMethod(methodsInFile, callPos);
+                    // Skip if the enclosing method IS the touched method itself
+                    // (would mean we're looking at its own declaration/recursive call context)
+                    if (enclosing != null && !enclosing.equals(pureMethodName)) {
+                        debug("[DEBUG] step 4c: raw occurrence of '" + pureMethodName + "' at " + callPos + " enclosed by " + enclosing);
+                        callers.add(enclosing);
+                    }
+                }
+            }
+            debug("[DEBUG] step 4c: found " + callers.size() + " callers");
         }
 
         // 5. Unqualified calls: method(...) when statically imported from targetFqn
