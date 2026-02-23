@@ -221,20 +221,29 @@ public class ImpactAnalyzer {
      * Finds methods in {@code content} that call any of {@code touchedMethods} on the target class.
      * {@code supertypeSimpleNames} lists the target's interfaces/superclass simple names so that
      * injection via interface type (e.g. {@code @Autowired IFoo foo;}) is also detected.
+     * {@code confirmedDependent} indicates whether this file is confirmed as a dependent by the
+     * reverse dependency graph; when true, structural fallback is enabled for this file even if
+     * literal method names don't appear, allowing the BFS to discover transitive dependencies.
      */
     public static List<String> getMethodsCalling(String content, String targetSimpleName, String targetFqn,
                                                   List<String> supertypeSimpleNames,
+                                                  List<String> touchedMethods, boolean allowBroadFallback, boolean confirmedDependent) {
+        return getMethodsCallingImpl(content, targetSimpleName, targetFqn, supertypeSimpleNames, touchedMethods, allowBroadFallback, confirmedDependent);
+    }
+
+    public static List<String> getMethodsCalling(String content, String targetSimpleName, String targetFqn,
+                                                  List<String> supertypeSimpleNames,
                                                   List<String> touchedMethods, boolean allowBroadFallback) {
-        return getMethodsCallingImpl(content, targetSimpleName, targetFqn, supertypeSimpleNames, touchedMethods, allowBroadFallback);
+        return getMethodsCallingImpl(content, targetSimpleName, targetFqn, supertypeSimpleNames, touchedMethods, allowBroadFallback, false);
     }
 
     public static List<String> getMethodsCalling(String content, String targetSimpleName, String targetFqn, List<String> touchedMethods, boolean allowBroadFallback) {
-        return getMethodsCallingImpl(content, targetSimpleName, targetFqn, Collections.emptyList(), touchedMethods, allowBroadFallback);
+        return getMethodsCallingImpl(content, targetSimpleName, targetFqn, Collections.emptyList(), touchedMethods, allowBroadFallback, false);
     }
 
     private static List<String> getMethodsCallingImpl(String content, String targetSimpleName, String targetFqn,
                                                        List<String> supertypeSimpleNames,
-                                                       List<String> touchedMethods, boolean allowBroadFallback) {
+                                                       List<String> touchedMethods, boolean allowBroadFallback, boolean confirmedDependent) {
         if (content == null || content.isBlank() || touchedMethods == null || touchedMethods.isEmpty()) {
             return Collections.emptyList();
         }
@@ -256,20 +265,23 @@ public class ImpactAnalyzer {
         }
         if (!hasAnyTouchedToken) {
             // None of the touched method names appear literally in this file.
-            // Without the structural fallback enabled, we cannot confirm a real
-            // call site — return empty to avoid false edges in the BFS.
-            if (!structuralFallbackEnabled) {
-                debug("[DEBUG] getMethodsCallingImpl: no touched tokens, structural fallback disabled — skipping. target=" + targetSimpleName);
+            // When confirmedDependent=true (reverse graph already verified dependency), run
+            // structural fallback to find ANY calls on the target, enabling transitive BFS.
+            // When confirmedDependent=false, respect the structural fallback config flag.
+            boolean shouldRunStructural = confirmedDependent || structuralFallbackEnabled;
+            if (!shouldRunStructural) {
+                debug("[DEBUG] getMethodsCallingImpl: no touched tokens, structural fallback disabled, not a confirmed dependent — skipping. target=" + targetSimpleName);
                 return Collections.emptyList();
             }
-            // Structural fallback is on: check whether the target is even referenced
-            // before paying the cost of a full scan.
+            // Structural analysis is enabled (either via confirmedDependent or config):
+            // check whether the target is even referenced before paying the cost of a full scan.
             boolean likelyRef = isLikelyTargetReferencedInFile(content, targetSimpleName, targetFqn);
             if (!likelyRef) {
                 debug("[DEBUG] getMethodsCallingImpl: no tokens, no reference — skipping. target=" + targetSimpleName);
                 return Collections.emptyList();
             }
-            debug("[DEBUG] getMethodsCallingImpl: no touched tokens, structural fallback enabled. Running AST/structural scan. target=" + targetSimpleName);
+            String reason = confirmedDependent ? "confirmed dependent" : "structural fallback enabled";
+            debug("[DEBUG] getMethodsCallingImpl: no touched tokens, " + reason + ". Running AST/structural scan. target=" + targetSimpleName);
             List<String> structural = getMethodsUsingTarget(content, targetSimpleName, targetFqn, supertypeSimpleNames);
             debug("[DEBUG] getMethodsCallingImpl: structural scan found " + structural.size() + " callers for target=" + targetSimpleName + ": " + structural);
             return structural;

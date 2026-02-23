@@ -520,12 +520,12 @@ public class ReviewEngine {
                 }
 
                 // Only traverse/record endpoints if we can prove a call chain to the impacted methods.
-                // getMethodsCalling runs token-based steps first (1-4c), then falls through to
-                // the structural instance-level scan (step 6) if all token steps fail.
-                // A single call covers all cases; no second pass needed.
+                // For transitive discovery, pass confirmedDependent=true to enable structural fallback
+                // even when literal method names don't appear. This allows the BFS to discover
+                // intermediate helpers/utilities that depend on the target but call other methods.
                 String currentSimpleName = simpleNameFromFqn(node.fqn);
                 debug("Transitive: checking " + depFileName + " for calls to " + currentSimpleName + "." + node.impactedMethods);
-                List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, currentSimpleName, node.fqn, node.supertypeSimpleNames, node.impactedMethods, false);
+                List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, currentSimpleName, node.fqn, node.supertypeSimpleNames, node.impactedMethods, false, true);
                 callingMethods = ImpactAnalyzer.filterValidMethodNames(callingMethods);
                 debug("Transitive: found calling methods in " + depFileName + ": " + callingMethods);
 
