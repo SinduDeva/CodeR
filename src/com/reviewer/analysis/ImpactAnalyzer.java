@@ -16,6 +16,13 @@ public class ImpactAnalyzer {
      * false-positive endpoints.
      */
     private static volatile boolean structuralFallbackEnabled = false;
+    /**
+     * When true (default), step 6 prefers the JavaParser AST engine for caller
+     * detection when javaparser-core.jar is on the classpath.
+     * When false, skips AST even if available and uses the regex path instead.
+     * Controlled by {@code use.ast.caller.detection=false} in the properties file.
+     */
+    private static volatile boolean astCallerDetectionEnabled = true;
 
     public static void setDebugEnabled(boolean enabled) {
         debugEnabled = enabled;
@@ -23,6 +30,10 @@ public class ImpactAnalyzer {
 
     public static void setStructuralFallbackEnabled(boolean enabled) {
         structuralFallbackEnabled = enabled;
+    }
+
+    public static void setAstCallerDetectionEnabled(boolean enabled) {
+        astCallerDetectionEnabled = enabled;
     }
 
     private static void debug(String msg) {
@@ -448,7 +459,7 @@ public class ImpactAnalyzer {
         // The regex scan is used only if the AST library is not on the classpath.
         if (callers.isEmpty() && structuralFallbackEnabled && !instanceNames.isEmpty()) {
             debug("[DEBUG] step 6: structural fallback enabled, running for target=" + targetSimpleName);
-            if (AstInvocationFinder.isAvailable()) {
+            if (astCallerDetectionEnabled && AstInvocationFinder.isAvailable()) {
                 // AST path: precise, no string/comment false-positives
                 List<String> astCallers = AstInvocationFinder.findCallerMethods(
                         content, targetSimpleName, targetFqn,

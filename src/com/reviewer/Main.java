@@ -14,7 +14,11 @@ public class Main {
         try {
             Config config = loadConfig();
             ReviewEngine engine = new ReviewEngine(config);
-            
+            System.out.println("[INFO] JavaParser AST analysis: " +
+                (com.reviewer.analysis.AstInvocationFinder.isAvailable()
+                    ? (config.useAstCallerDetection ? "enabled" : "available but disabled (use.ast.caller.detection=false)")
+                    : "unavailable — javaparser-core.jar not on classpath (regex fallback active)"));
+
             List<ChangedFile> files = new ArrayList<>();
             if (args.length == 0) {
                 // Hook mode: auto-detect staged files
@@ -135,6 +139,7 @@ public class Main {
         config.rebuildGraphCache = Boolean.parseBoolean(props.getProperty("rebuild.graph.cache", String.valueOf(config.rebuildGraphCache)));
         config.graphCacheTtlHours = Integer.parseInt(props.getProperty("graph.cache.ttl.hours", String.valueOf(config.graphCacheTtlHours)));
         config.transitiveCallerStructuralFallback = Boolean.parseBoolean(props.getProperty("transitive.caller.structural.fallback", String.valueOf(config.transitiveCallerStructuralFallback)));
+        config.useAstCallerDetection = Boolean.parseBoolean(props.getProperty("use.ast.caller.detection", String.valueOf(config.useAstCallerDetection)));
     }
 
     private static void openReport(String reportPath) {

@@ -70,6 +70,13 @@ if exist "%REPO_DIR%.code-reviewer.properties" (
     copy /y "%REPO_DIR%.code-reviewer.properties" "%INSTALL_DIR%\.code-reviewer.properties" >nul
 )
 
+:: Copy dependency JARs (e.g. javaparser-core.jar) so they are on the runtime classpath
+if exist "%REPO_DIR%lib" (
+    echo   [INFO] Copying dependency JARs...
+    if not exist "%INSTALL_DIR%\lib" mkdir "%INSTALL_DIR%\lib"
+    xcopy /s /y "%REPO_DIR%lib\*" "%INSTALL_DIR%\lib\" >nul
+)
+
 :: Copy PMD configuration
 if exist "%REPO_DIR%config\pmd" (
     echo   [INFO] Copying PMD configuration...

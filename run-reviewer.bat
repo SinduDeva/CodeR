@@ -77,8 +77,10 @@ echo [2/2] Running Analysis...
 echo.
 
 :: Run the application
+:: Note: -cp is used instead of -jar so that lib\* (e.g. javaparser-core.jar)
+:: is always included on the classpath regardless of the JAR manifest.
 if exist "%JAR_PATH%" (
-    java -jar "%JAR_PATH%" %*
+    java -cp "%JAR_PATH%;%~dp0lib\*" %MAIN_CLASS% %*
 ) else (
     java -cp "%BIN_DIR%;%~dp0lib\*" %MAIN_CLASS% %*
 )

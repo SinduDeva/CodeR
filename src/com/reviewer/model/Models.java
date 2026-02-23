@@ -179,6 +179,16 @@ public class Models {
          * Set via property: transitive.caller.structural.fallback=true
          */
         public boolean transitiveCallerStructuralFallback = false;
+        /**
+         * When true (default), step 6 of the transitive caller scan uses the
+         * JavaParser AST engine (AstInvocationFinder) when it is available on
+         * the classpath — giving precise, comment/string-safe call detection.
+         * Set to false to force the regex-based path even when JavaParser is
+         * present (useful for comparing results or when AST parsing is slow).
+         *
+         * Set via property: use.ast.caller.detection=false
+         */
+        public boolean useAstCallerDetection = true;
         public String pmdPath = "pmd";
         public String pmdRulesetPath = "config/pmd/changelens-ruleset.xml";
         // Target Java source version; used to gate version-specific rules (e.g. pattern matching >= 16)
