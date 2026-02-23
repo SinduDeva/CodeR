@@ -51,6 +51,7 @@ public class AstInvocationFinder {
      * @param touchedMethods    Changed method names to match; empty = match any call
      * @return distinct enclosing-method names containing a matching call site
      */
+    @SuppressWarnings("unchecked")
     public static List<String> findCallerMethods(
             String content,
             String targetSimpleName,
