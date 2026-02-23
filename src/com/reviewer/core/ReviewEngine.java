@@ -448,7 +448,8 @@ public class ReviewEngine {
                             config.transitiveApiDiscoveryMaxDepth,
                             config.transitiveApiDiscoveryMaxVisitedFiles,
                             config.transitiveApiDiscoveryMaxControllers,
-                            callChainNotes
+                            callChainNotes,
+                            new HashSet<>(entry.methodScopedDependents)
                     );
                     if (!transitiveEndpoints.isEmpty()) {
                         if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
@@ -468,7 +469,7 @@ public class ReviewEngine {
         return impact;
     }
 
-    private List<String> discoverTransitiveControllerEndpoints(JavaSymbolIndex.ClassInfo startClass, List<String> initialTouchedMethods, int maxDepth, int maxVisitedFiles, int maxControllers, List<String> outCallChainNotes) {
+    private List<String> discoverTransitiveControllerEndpoints(JavaSymbolIndex.ClassInfo startClass, List<String> initialTouchedMethods, int maxDepth, int maxVisitedFiles, int maxControllers, List<String> outCallChainNotes, Set<String> seedPaths) {
         if (startClass == null || reverseDependencyGraph == null || reverseDependencyGraph.isEmpty()) {
             return Collections.emptyList();
         }
@@ -481,7 +482,7 @@ public class ReviewEngine {
 
         Queue<TransitiveNode> queue = new ArrayDeque<>();
         Set<String> visitedFqns = new HashSet<>();
-        Set<String> visitedPaths = new HashSet<>();
+        Set<String> visitedPaths = new HashSet<>(seedPaths);
         List<String> endpoints = new ArrayList<>();
 
         queue.add(new TransitiveNode(startClass.fqn, ImpactAnalyzer.filterValidMethodNames(initialTouchedMethods), 0, startClass.supertypeSimpleNames));
