@@ -134,6 +134,7 @@ public class Main {
         config.methodScopedDependencyGraph = Boolean.parseBoolean(props.getProperty("dependency.graph.scope.method", String.valueOf(config.methodScopedDependencyGraph)));
         config.rebuildGraphCache = Boolean.parseBoolean(props.getProperty("rebuild.graph.cache", String.valueOf(config.rebuildGraphCache)));
         config.graphCacheTtlHours = Integer.parseInt(props.getProperty("graph.cache.ttl.hours", String.valueOf(config.graphCacheTtlHours)));
+        config.transitiveCallerStructuralFallback = Boolean.parseBoolean(props.getProperty("transitive.caller.structural.fallback", String.valueOf(config.transitiveCallerStructuralFallback)));
     }
 
     private static void openReport(String reportPath) {

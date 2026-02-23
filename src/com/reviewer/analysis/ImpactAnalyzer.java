@@ -7,9 +7,22 @@ import java.util.stream.Collectors;
 
 public class ImpactAnalyzer {
     private static volatile boolean debugEnabled = false;
+    /**
+     * Controls whether the structural fallback (step 6 / AST scan) is active.
+     * Off by default — only touches methods that literally contain the touched-method
+     * token are followed, keeping the impacted endpoint list precise.
+     * Set to true via {@code transitive.caller.structural.fallback=true} in the
+     * properties file to enable broader discovery at the cost of potential
+     * false-positive endpoints.
+     */
+    private static volatile boolean structuralFallbackEnabled = false;
 
     public static void setDebugEnabled(boolean enabled) {
         debugEnabled = enabled;
+    }
+
+    public static void setStructuralFallbackEnabled(boolean enabled) {
+        structuralFallbackEnabled = enabled;
     }
 
     private static void debug(String msg) {
@@ -231,16 +244,21 @@ public class ImpactAnalyzer {
             }
         }
         if (!hasAnyTouchedToken) {
-            // Touched-method tokens not found — the call is hidden behind a delegate, proxy,
-            // lambda, or chained expression.  Run the structural scan instead:
-            // find every method in this file that calls ANY method on the target's instances.
-            // This does not rely on the specific touched-method name appearing literally.
+            // None of the touched method names appear literally in this file.
+            // Without the structural fallback enabled, we cannot confirm a real
+            // call site — return empty to avoid false edges in the BFS.
+            if (!structuralFallbackEnabled) {
+                debug("[DEBUG] getMethodsCallingImpl: no touched tokens, structural fallback disabled — skipping. target=" + targetSimpleName);
+                return Collections.emptyList();
+            }
+            // Structural fallback is on: check whether the target is even referenced
+            // before paying the cost of a full scan.
             boolean likelyRef = isLikelyTargetReferencedInFile(content, targetSimpleName, targetFqn);
             if (!likelyRef) {
                 debug("[DEBUG] getMethodsCallingImpl: no tokens, no reference — skipping. target=" + targetSimpleName);
                 return Collections.emptyList();
             }
-            debug("[DEBUG] getMethodsCallingImpl: no touched tokens but target IS referenced. Running structural scan. target=" + targetSimpleName);
+            debug("[DEBUG] getMethodsCallingImpl: no touched tokens, structural fallback enabled. Running AST/structural scan. target=" + targetSimpleName);
             List<String> structural = getMethodsUsingTarget(content, targetSimpleName, targetFqn, supertypeSimpleNames);
             debug("[DEBUG] getMethodsCallingImpl: structural scan found " + structural.size() + " callers for target=" + targetSimpleName + ": " + structural);
             return structural;
@@ -418,32 +436,48 @@ public class ImpactAnalyzer {
             debug("[DEBUG] step 4c: found " + callers.size() + " callers");
         }
 
-        // 6. Structural fallback: instance-level scan.
-        // Runs when all token/qualifier steps found nothing — typically when the call is
-        // hidden behind a chained expression, lambda, interface proxy, or delegate and
-        // the touched-method name never appears as a simple qualifier.method() pattern.
-        // Reuses the already-computed instanceNames and methodsInFile to avoid redundant work.
-        // Finds every enclosing method that calls ANY method on the target's typed instances.
-        if (callers.isEmpty() && !instanceNames.isEmpty()) {
-            for (String inst : instanceNames) {
-                if (inst == null || inst.isBlank()) continue;
-                Pattern dotCall = Pattern.compile("\\b" + Pattern.quote(inst) + "\\s*\\.\\s*(\\w+)\\s*\\(");
-                Matcher dc = dotCall.matcher(content);
-                while (dc.find()) {
-                    String enclosing = findEnclosingMethod(methodsInFile, dc.start());
-                    if (enclosing != null) {
-                        debug("[DEBUG] step 6 structural: " + inst + "." + dc.group(1) + "() in " + enclosing);
-                        callers.add(enclosing);
+        // 6. Structural fallback — only runs when explicitly enabled via config flag
+        // (transitive.caller.structural.fallback=true).  Off by default because it
+        // emits edges for ANY call on the target type, not just the touched methods,
+        // which can pull unrelated execution paths into the BFS and surface false-
+        // positive endpoints.
+        //
+        // When enabled, the AST-based scanner (AstInvocationFinder) is preferred:
+        // it never matches inside strings/comments, handles chains/lambdas precisely,
+        // and attributes lambda-body calls to the correct enclosing named method.
+        // The regex scan is used only if the AST library is not on the classpath.
+        if (callers.isEmpty() && structuralFallbackEnabled && !instanceNames.isEmpty()) {
+            debug("[DEBUG] step 6: structural fallback enabled, running for target=" + targetSimpleName);
+            if (AstInvocationFinder.isAvailable()) {
+                // AST path: precise, no string/comment false-positives
+                List<String> astCallers = AstInvocationFinder.findCallerMethods(
+                        content, targetSimpleName, targetFqn,
+                        supertypeSimpleNames != null ? supertypeSimpleNames : Collections.emptyList(),
+                        touchedMethods);
+                callers.addAll(astCallers);
+                debug("[DEBUG] step 6 AST: found " + astCallers.size() + " callers: " + astCallers);
+            } else {
+                // Regex fallback when JavaParser is unavailable
+                for (String inst : instanceNames) {
+                    if (inst == null || inst.isBlank()) continue;
+                    Pattern dotCall = Pattern.compile("\\b" + Pattern.quote(inst) + "\\s*\\.\\s*(\\w+)\\s*\\(");
+                    Matcher dc = dotCall.matcher(content);
+                    while (dc.find()) {
+                        String enclosing = findEnclosingMethod(methodsInFile, dc.start());
+                        if (enclosing != null) {
+                            debug("[DEBUG] step 6 regex: " + inst + "." + dc.group(1) + "() in " + enclosing);
+                            callers.add(enclosing);
+                        }
+                    }
+                    Pattern ref = Pattern.compile("\\b" + Pattern.quote(inst) + "\\s*::\\s*(\\w+)\\b");
+                    Matcher rm2 = ref.matcher(content);
+                    while (rm2.find()) {
+                        String enclosing = findEnclosingMethod(methodsInFile, rm2.start());
+                        if (enclosing != null) callers.add(enclosing);
                     }
                 }
-                Pattern ref = Pattern.compile("\\b" + Pattern.quote(inst) + "\\s*::\\s*(\\w+)\\b");
-                Matcher rm2 = ref.matcher(content);
-                while (rm2.find()) {
-                    String enclosing = findEnclosingMethod(methodsInFile, rm2.start());
-                    if (enclosing != null) callers.add(enclosing);
-                }
+                debug("[DEBUG] step 6 regex: found " + callers.size() + " callers");
             }
-            debug("[DEBUG] step 6 structural: found " + callers.size() + " callers");
         }
 
         return new ArrayList<>(callers);

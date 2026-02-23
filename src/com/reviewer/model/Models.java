@@ -166,6 +166,19 @@ public class Models {
         public String windsurfEndpoint = "http://localhost:49321/impact";
         public boolean enablePmdAnalysis = false;
         public boolean enableStructuralImpact = true;
+        /**
+         * When false (default), the BFS only emits a caller edge when the touched method
+         * name is literally present in the dependent file (token-based search, steps 1-5).
+         * This is precise but misses calls hidden behind chained expressions or delegates.
+         *
+         * When true, enables the structural fallback (step 6 / JavaParser AST scan):
+         * if the token search finds nothing, the tool looks for ANY method call on the
+         * target's typed instances.  More recall, but may surface endpoints whose
+         * execution path does not actually invoke the changed method.
+         *
+         * Set via property: transitive.caller.structural.fallback=true
+         */
+        public boolean transitiveCallerStructuralFallback = false;
         public String pmdPath = "pmd";
         public String pmdRulesetPath = "config/pmd/changelens-ruleset.xml";
         // Target Java source version; used to gate version-specific rules (e.g. pattern matching >= 16)

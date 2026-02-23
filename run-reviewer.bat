@@ -24,7 +24,13 @@ for /r "%SRC_DIR%" %%f in (*.java) do (
     set "JAVA_FILES=!JAVA_FILES! "%%f""
 )
 
-javac -d "%BIN_DIR%" -sourcepath "%SRC_DIR%" !JAVA_FILES!
+:: Build classpath from lib/ jars (e.g. javaparser-core.jar)
+set "CP=."
+if exist "%~dp0lib" (
+    for %%i in ("%~dp0lib\*.jar") do set "CP=!CP!;%%i"
+)
+
+javac -d "%BIN_DIR%" -sourcepath "%SRC_DIR%" -classpath "!CP!" !JAVA_FILES!
 
 if %ERRORLEVEL% neq 0 (
     echo.
@@ -74,7 +80,7 @@ echo.
 if exist "%JAR_PATH%" (
     java -jar "%JAR_PATH%" %*
 ) else (
-    java -cp "%BIN_DIR%" %MAIN_CLASS% %*
+    java -cp "%BIN_DIR%;%~dp0lib\*" %MAIN_CLASS% %*
 )
 
 if %ERRORLEVEL% neq 0 (

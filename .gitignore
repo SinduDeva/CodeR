@@ -4,6 +4,8 @@ bin/
 
 # JAR artifacts (built by install.bat)
 *.jar
+# But track bundled runtime dependencies
+!lib/*.jar
 
 # PMD download cache
 pmd.zip

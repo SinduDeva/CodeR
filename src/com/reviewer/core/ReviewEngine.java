@@ -335,6 +335,7 @@ public class ReviewEngine {
 
     private List<ImpactEntry> analyzeImpact(List<ChangedFile> files) {
         ImpactAnalyzer.setDebugEnabled(config != null && config.debug);
+        ImpactAnalyzer.setStructuralFallbackEnabled(config != null && config.transitiveCallerStructuralFallback);
         List<ImpactEntry> impact = new ArrayList<>();
         for (ChangedFile f : files) {
             ImpactEntry entry = new ImpactEntry(f.name);
