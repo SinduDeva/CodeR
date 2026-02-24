@@ -484,7 +484,7 @@ public class ReviewEngine {
         Set<String> visitedPaths = new HashSet<>();
         List<String> endpoints = new ArrayList<>();
 
-        queue.add(new TransitiveNode(startClass.fqn, ImpactAnalyzer.filterValidMethodNames(initialTouchedMethods), 0, startClass.supertypeSimpleNames));
+        queue.add(new TransitiveNode(startClass.fqn, ImpactAnalyzer.filterValidMethodNames(initialTouchedMethods), 0, startClass.supertypeSimpleNames, null));
         visitedFqns.add(startClass.fqn);
 
         int visitedFiles = 0;
@@ -493,6 +493,10 @@ public class ReviewEngine {
         while (!queue.isEmpty() && visitedFiles < maxVisitedFiles && foundControllers < maxControllers) {
             TransitiveNode node = queue.poll();
             if (node.depth >= maxDepth) continue;
+
+            // Emit the call-chain note here (not at enqueue) so notes only appear for nodes
+            // that actually pass the depth guard and are processed.
+            if (node.callChainNote != null) outCallChainNotes.add(node.callChainNote);
 
             if (node.impactedMethods == null || node.impactedMethods.isEmpty()) {
                 continue;
@@ -583,9 +587,9 @@ public class ReviewEngine {
                             : callingMethods.subList(0, Math.min(2, callingMethods.size()))
                                     .stream().map(m -> m + "()").collect(Collectors.joining(", "))
                               + (callingMethods.size() > 2 ? ", +" + (callingMethods.size() - 2) + " more" : "");
-                    outCallChainNotes.add("Transitive caller [depth " + (node.depth + 1) + "]: "
-                            + depInfo.simpleName + "." + methodSummary);
-                    queue.add(new TransitiveNode(depInfo.fqn, callingMethods, node.depth + 1, depInfo.supertypeSimpleNames));
+                    String note = "Transitive caller [depth " + (node.depth + 1) + "]: "
+                            + depInfo.simpleName + "." + methodSummary;
+                    queue.add(new TransitiveNode(depInfo.fqn, callingMethods, node.depth + 1, depInfo.supertypeSimpleNames, note));
                 }
             }
         }
@@ -666,11 +670,14 @@ public class ReviewEngine {
         final int depth;
         /** Simple names of the target's supertypes/interfaces for interface-injection detection. */
         final List<String> supertypeSimpleNames;
-        TransitiveNode(String fqn, List<String> impactedMethods, int depth, List<String> supertypeSimpleNames) {
+        /** Human-readable call-chain note for this node; emitted only if the node passes the depth guard. */
+        final String callChainNote;
+        TransitiveNode(String fqn, List<String> impactedMethods, int depth, List<String> supertypeSimpleNames, String callChainNote) {
             this.fqn = fqn;
             this.impactedMethods = impactedMethods;
             this.depth = depth;
             this.supertypeSimpleNames = supertypeSimpleNames != null ? supertypeSimpleNames : Collections.emptyList();
+            this.callChainNote = callChainNote;
         }
     }
 
