@@ -374,13 +374,15 @@ public class ReviewEngine {
                     boolean multiTouched = touchedMethods.size() > 1;
                     if (multiTouched) {
                         for (String tm : touchedMethods) {
+                            // Expand to include annotated handlers that delegate to this touched method.
+                            List<String> tmScope = ImpactAnalyzer.expandWithIntraClassCallers(content, Collections.singletonList(tm));
                             List<String> eps = null;
                             if (com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
-                                eps = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(content, className, Collections.singletonList(tm));
+                                eps = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(content, className, tmScope);
                                 debug("Controller self endpoints (tree-sitter) for " + tm + ": " + eps);
                             }
                             if (eps == null || eps.isEmpty()) {
-                                eps = ImpactAnalyzer.extractControllerEndpoints(content, className, Collections.singletonList(tm));
+                                eps = ImpactAnalyzer.extractControllerEndpoints(content, className, tmScope);
                                 debug("Controller self endpoints (regex) for " + tm + ": " + eps);
                             }
                             if (eps != null) {
@@ -390,13 +392,15 @@ public class ReviewEngine {
                             }
                         }
                     } else {
+                        // Expand to include annotated handlers that delegate to any touched method.
+                        List<String> tmScope = ImpactAnalyzer.expandWithIntraClassCallers(content, touchedMethods);
                         List<String> endpoints = null;
                         if (com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
-                            endpoints = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(content, className, touchedMethods);
+                            endpoints = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(content, className, tmScope);
                             debug("Controller self endpoints (tree-sitter): " + endpoints);
                         }
                         if (endpoints == null || endpoints.isEmpty()) {
-                            endpoints = ImpactAnalyzer.extractControllerEndpoints(content, className, touchedMethods);
+                            endpoints = ImpactAnalyzer.extractControllerEndpoints(content, className, tmScope);
                             debug("Controller self endpoints (regex): " + endpoints);
                         }
                         if (endpoints != null) {
@@ -448,16 +452,18 @@ public class ReviewEngine {
                             if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
                             if (multiTouched) {
                                 // Extract endpoints per caller so each carries [via tm()] attribution.
+                                // Expand each caller to include annotated handlers that delegate to it.
                                 for (Map.Entry<String, List<String>> e : callerToVia.entrySet()) {
+                                    List<String> callerScope = ImpactAnalyzer.expandWithIntraClassCallers(depContent, Collections.singletonList(e.getKey()));
                                     List<String> eps = null;
                                     if (config.enableStructuralImpact && com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
                                         eps = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(
-                                                depContent, depClassName, Collections.singletonList(e.getKey()));
+                                                depContent, depClassName, callerScope);
                                         debug("Tree-sitter endpoints for " + depFileName + " caller " + e.getKey() + ": " + eps);
                                     }
                                     if (eps == null || eps.isEmpty()) {
                                         eps = ImpactAnalyzer.extractControllerEndpoints(
-                                                depContent, depClassName, Collections.singletonList(e.getKey()));
+                                                depContent, depClassName, callerScope);
                                         debug("Regex endpoints for " + depFileName + " caller " + e.getKey() + ": " + eps);
                                     }
                                     if (eps != null) {
@@ -468,15 +474,17 @@ public class ReviewEngine {
                                     }
                                 }
                             } else {
+                                // Expand callingMethods to include annotated handlers that delegate to them.
+                                List<String> callerScope = ImpactAnalyzer.expandWithIntraClassCallers(depContent, callingMethods);
                                 List<String> endpoints = null;
                                 // TreeSitter needs the Controller's own methods to find mapping annotations
                                 if (config.enableStructuralImpact && com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
-                                    endpoints = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(depContent, depClassName, callingMethods);
+                                    endpoints = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(depContent, depClassName, callerScope);
                                     debug("Tree-sitter endpoints for " + depFileName + ": " + endpoints);
                                 }
                                 // Regex fallback needs the CONTROLLER methods to find the impacted endpoints
                                 if (endpoints == null || endpoints.isEmpty()) {
-                                    endpoints = ImpactAnalyzer.extractControllerEndpoints(depContent, depClassName, callingMethods);
+                                    endpoints = ImpactAnalyzer.extractControllerEndpoints(depContent, depClassName, callerScope);
                                     debug("Regex endpoints for " + depFileName + ": " + endpoints);
                                 }
                                 if (endpoints != null) {
@@ -614,12 +622,17 @@ public class ReviewEngine {
 
                 if (isController) {
                     foundControllers++;
+                    // Expand callingMethods to include annotated endpoint handlers that delegate
+                    // to the found callers (e.g. @PostMapping createOrder() → private doCreate()
+                    // → service.touchedMethod()). Without expansion, doCreate has no annotation
+                    // and extractControllerEndpoints returns empty; createOrder would be missed.
+                    List<String> callerScope = ImpactAnalyzer.expandWithIntraClassCallers(depContent, callingMethods);
                     List<String> controllerEndpoints = null;
                     if (config.enableStructuralImpact && com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
-                        controllerEndpoints = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(depContent, depInfo.simpleName, callingMethods);
+                        controllerEndpoints = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(depContent, depInfo.simpleName, callerScope);
                     }
                     if (controllerEndpoints == null || controllerEndpoints.isEmpty()) {
-                        controllerEndpoints = ImpactAnalyzer.extractControllerEndpoints(depContent, depInfo.simpleName, callingMethods);
+                        controllerEndpoints = ImpactAnalyzer.extractControllerEndpoints(depContent, depInfo.simpleName, callerScope);
                     }
                     if (controllerEndpoints != null) endpoints.addAll(controllerEndpoints);
                 } else {

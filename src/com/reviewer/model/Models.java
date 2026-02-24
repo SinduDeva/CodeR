@@ -160,10 +160,6 @@ public class Models {
         public int transitiveApiDiscoveryMaxDepth = 6;
         public int transitiveApiDiscoveryMaxVisitedFiles = 30;
         public int transitiveApiDiscoveryMaxControllers = 5;
-        public String primaryModel = "gpt-5.1-codex";
-        public String secondaryModel = "swe-1.5";
-        public boolean useWindsurf = true;
-        public String windsurfEndpoint = "http://localhost:49321/impact";
         public boolean enablePmdAnalysis = false;
         public boolean enableStructuralImpact = true;
         /**

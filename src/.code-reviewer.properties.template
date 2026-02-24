@@ -25,17 +25,16 @@ strict.spring=true
 # Show positive feedback for good patterns
 show.good.patterns=true
 
-# Show testing scope section (set to true to re-enable)
+# Show testing scope section in the report
 show.testing.scope=false
 
-# Enable PMD integration (runs config/pmd/changelens-ruleset.xml on changed files)
-pmd.enabled=false
-
+# ── PMD integration ───────────────────────────────────────────────────────────
+# Enable PMD static analysis on changed files
+enable.pmd.analysis=false
+# Path to the PMD executable (pmd on Unix/Mac, pmd.bat on Windows)
+pmd.path=pmd
 # Custom PMD ruleset path (relative to repo root)
-pmd.ruleset=config/pmd/changelens-ruleset.xml
-
-# PMD command (pmd on Unix, pmd.bat on Windows)
-pmd.command=pmd
+pmd.ruleset.path=config/pmd/changelens-ruleset.xml
 
 # Automatically open HTML report in browser
 open.report=true
@@ -43,12 +42,25 @@ open.report=true
 # Enable debug output
 debug=false
 
+# ── Transitive API discovery (BFS call-graph traversal) ───────────────────────
 enable.transitive.api.discovery=true
 transitive.api.discovery.max.depth=8
 transitive.api.discovery.max.visited.files=200
 transitive.api.discovery.max.controllers=10
 
-# Java version of the projects being reviewed
+# Use TreeSitter/structural analysis for endpoint extraction
+enable.structural.impact=true
+
+# ── Report display ─────────────────────────────────────────────────────────────
+# Method-scoped graph (true, default): dependency map shows only files proven to call a
+# changed method.  Set false for a broader class-level view.
+dependency.graph.scope.method=true
+
+# ── Dependency graph cache ────────────────────────────────────────────────────
+graph.cache.ttl.hours=12
+rebuild.graph.cache=false
+
+# ── Target Java version ───────────────────────────────────────────────────────
 # Controls which version-specific rules are active (e.g. pattern-matching instanceof >= 16)
 # Supported: 8, 11, 17, 21
 java.source.version=17
