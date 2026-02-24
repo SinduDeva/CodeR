@@ -525,13 +525,17 @@ public class ReviewEngine {
                 }
 
                 // Only traverse/record endpoints if we can prove a call chain to the impacted methods.
-                // Token-based steps (1-4c) run first. For BFS intermediate hops, confirmedDependent=true
-                // allows the structural fallback (step 6) to fire when literal method names don't appear
-                // — e.g. when calls go through an interface type or a delegate — so the BFS can traverse
-                // the full chain and reach the controller.
+                // For intermediate (non-controller) hops, confirmedDependent=true allows the structural
+                // fallback (step 6) to fire when the method name doesn't appear literally — e.g. calls
+                // through an interface type or delegate — so the BFS can traverse the full chain.
+                // For controllers, confirmedDependent=false forces token-based matching only: we must
+                // find the exact impacted method name in the controller method body, otherwise the
+                // structural scan would return every controller method that injects the service and
+                // surface unrelated endpoints.
+                boolean isController = depContent.contains("@RestController") || depContent.contains("@Controller");
                 String currentSimpleName = simpleNameFromFqn(node.fqn);
                 debug("Transitive: checking " + depFileName + " for calls to " + currentSimpleName + "." + node.impactedMethods);
-                List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, currentSimpleName, node.fqn, node.supertypeSimpleNames, node.impactedMethods, false, true);
+                List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, currentSimpleName, node.fqn, node.supertypeSimpleNames, node.impactedMethods, false, !isController);
                 callingMethods = ImpactAnalyzer.filterValidMethodNames(callingMethods);
                 debug("Transitive: found calling methods in " + depFileName + ": " + callingMethods);
 
@@ -539,8 +543,6 @@ public class ReviewEngine {
                     continue;
                 }
 
-                boolean isController = depContent.contains("@RestController") || depContent.contains("@Controller");
-                
                 // Mark visited only when we have a proven call-chain.
                 // For controllers, we use a different key (fqn + methods) so we can revisit with different calling methods
                 String visitKey = isController ? (depInfo.fqn + ":" + callingMethods.toString()) : dependentFile;
@@ -560,15 +562,6 @@ public class ReviewEngine {
                     if (controllerEndpoints == null || controllerEndpoints.isEmpty()) {
                         controllerEndpoints = ImpactAnalyzer.extractControllerEndpoints(depContent, depInfo.simpleName, callingMethods);
                     }
-
-                    // Fallback: if we found calling methods but no specific endpoints, extract all endpoints.
-                    // This handles cases where endpoint annotation parsing failed (e.g., method in base class,
-                    // complex annotation forms). If the controller method calls the chain, it's likely an endpoint.
-                    if ((controllerEndpoints == null || controllerEndpoints.isEmpty()) && !callingMethods.isEmpty()) {
-                        debug("Transitive: calling methods found but no endpoints extracted for " + depFileName + "; using fallback to extract all controller endpoints");
-                        controllerEndpoints = ImpactAnalyzer.extractAllControllerEndpoints(depContent, depInfo.simpleName);
-                    }
-
                     if (controllerEndpoints != null) endpoints.addAll(controllerEndpoints);
                 } else {
                     // Key by (fqn + sorted touched methods) so the same class can be re-enqueued
