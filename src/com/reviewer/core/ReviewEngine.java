@@ -371,18 +371,37 @@ public class ReviewEngine {
 
                 if (!touchedMethods.isEmpty() && (content.contains("@RestController") || content.contains("@Controller"))) {
                     if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
-
-                    List<String> endpoints = null;
-                    if (com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
-                        endpoints = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(content, className, touchedMethods);
-                        debug("Controller self endpoints (tree-sitter): " + endpoints);
-                    }
-                    if (endpoints == null || endpoints.isEmpty()) {
-                        endpoints = ImpactAnalyzer.extractControllerEndpoints(content, className, touchedMethods);
-                        debug("Controller self endpoints (regex): " + endpoints);
-                    }
-                    if (endpoints != null) {
-                        entry.endpoints.addAll(endpoints);
+                    boolean multiTouched = touchedMethods.size() > 1;
+                    if (multiTouched) {
+                        for (String tm : touchedMethods) {
+                            List<String> eps = null;
+                            if (com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
+                                eps = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(content, className, Collections.singletonList(tm));
+                                debug("Controller self endpoints (tree-sitter) for " + tm + ": " + eps);
+                            }
+                            if (eps == null || eps.isEmpty()) {
+                                eps = ImpactAnalyzer.extractControllerEndpoints(content, className, Collections.singletonList(tm));
+                                debug("Controller self endpoints (regex) for " + tm + ": " + eps);
+                            }
+                            if (eps != null) {
+                                for (String ep : eps) {
+                                    entry.endpoints.add(ep + " [via " + tm + "()]");
+                                }
+                            }
+                        }
+                    } else {
+                        List<String> endpoints = null;
+                        if (com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
+                            endpoints = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(content, className, touchedMethods);
+                            debug("Controller self endpoints (tree-sitter): " + endpoints);
+                        }
+                        if (endpoints == null || endpoints.isEmpty()) {
+                            endpoints = ImpactAnalyzer.extractControllerEndpoints(content, className, touchedMethods);
+                            debug("Controller self endpoints (regex): " + endpoints);
+                        }
+                        if (endpoints != null) {
+                            entry.endpoints.addAll(endpoints);
+                        }
                     }
                 }
 
@@ -398,38 +417,71 @@ public class ReviewEngine {
                     String depContent = readFileCached(depPath);
                     String depClassName = depFileName.replace(".java", "");
 
-                    // 1. Identify WHICH methods in the controller call the service.
-                    // Pass supertypeSimpleNames so injection via interface type is also detected.
-                    List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, classInfo.simpleName, classInfo.fqn, classInfo.supertypeSimpleNames, touchedMethods, true);
+                    // 1. Identify WHICH methods in the dependent call the service, attributed per
+                    //    touched method so notes and endpoints carry [via tm()] when >1 method changed.
+                    Map<String, List<String>> callerToVia = new LinkedHashMap<>();
+                    for (String tm : touchedMethods) {
+                        List<String> callers = ImpactAnalyzer.getMethodsCalling(
+                                depContent, classInfo.simpleName, classInfo.fqn,
+                                classInfo.supertypeSimpleNames,
+                                Collections.singletonList(tm), true);
+                        for (String caller : callers) {
+                            callerToVia.computeIfAbsent(caller, k -> new ArrayList<>()).add(tm);
+                        }
+                    }
+                    List<String> callingMethods = new ArrayList<>(callerToVia.keySet());
                     debug("Calling methods in " + depFileName + " -> " + callingMethods);
-
 
                     if (!callingMethods.isEmpty()) {
                         // Track method-scoped dependents for the graph display.
                         entry.methodScopedDependents.add(dependentFile);
                         String depType = classifyDependencyType(depContent, classInfo);
-                        for (String caller : callingMethods) {
-                            entry.notes.add("Impacted Method [" + depType + "]: " + depFileName + " -> " + caller + "()");
+                        boolean multiTouched = touchedMethods.size() > 1;
+                        for (Map.Entry<String, List<String>> e : callerToVia.entrySet()) {
+                            String via = multiTouched
+                                    ? " [via " + e.getValue().stream().map(m -> m + "()").collect(Collectors.joining(", ")) + "]"
+                                    : "";
+                            entry.notes.add("Impacted Method [" + depType + "]: " + depFileName + " -> " + e.getKey() + "()" + via);
                         }
 
                         if (depContent.contains("@RestController") || depContent.contains("@Controller")) {
                             if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
-
-                            List<String> endpoints = null;
-                            // TreeSitter needs the Controller's own methods to find mapping annotations
-                            if (config.enableStructuralImpact && com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
-                                endpoints = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(depContent, depClassName, callingMethods);
-                                debug("Tree-sitter endpoints for " + depFileName + ": " + endpoints);
-                            }
-
-                            // Regex fallback needs the CONTROLLER methods to find the impacted endpoints
-                            if (endpoints == null || endpoints.isEmpty()) {
-                                endpoints = ImpactAnalyzer.extractControllerEndpoints(depContent, depClassName, callingMethods);
-                                debug("Regex endpoints for " + depFileName + ": " + endpoints);
-                            }
-
-                            if (endpoints != null) {
-                                entry.endpoints.addAll(endpoints);
+                            if (multiTouched) {
+                                // Extract endpoints per caller so each carries [via tm()] attribution.
+                                for (Map.Entry<String, List<String>> e : callerToVia.entrySet()) {
+                                    List<String> eps = null;
+                                    if (config.enableStructuralImpact && com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
+                                        eps = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(
+                                                depContent, depClassName, Collections.singletonList(e.getKey()));
+                                        debug("Tree-sitter endpoints for " + depFileName + " caller " + e.getKey() + ": " + eps);
+                                    }
+                                    if (eps == null || eps.isEmpty()) {
+                                        eps = ImpactAnalyzer.extractControllerEndpoints(
+                                                depContent, depClassName, Collections.singletonList(e.getKey()));
+                                        debug("Regex endpoints for " + depFileName + " caller " + e.getKey() + ": " + eps);
+                                    }
+                                    if (eps != null) {
+                                        String via = " [via " + e.getValue().stream().map(m -> m + "()").collect(Collectors.joining(", ")) + "]";
+                                        for (String ep : eps) {
+                                            entry.endpoints.add(ep + via);
+                                        }
+                                    }
+                                }
+                            } else {
+                                List<String> endpoints = null;
+                                // TreeSitter needs the Controller's own methods to find mapping annotations
+                                if (config.enableStructuralImpact && com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
+                                    endpoints = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(depContent, depClassName, callingMethods);
+                                    debug("Tree-sitter endpoints for " + depFileName + ": " + endpoints);
+                                }
+                                // Regex fallback needs the CONTROLLER methods to find the impacted endpoints
+                                if (endpoints == null || endpoints.isEmpty()) {
+                                    endpoints = ImpactAnalyzer.extractControllerEndpoints(depContent, depClassName, callingMethods);
+                                    debug("Regex endpoints for " + depFileName + ": " + endpoints);
+                                }
+                                if (endpoints != null) {
+                                    entry.endpoints.addAll(endpoints);
+                                }
                             }
                         } else if (depContent.contains("@Service")) {
                             if (!entry.layers.contains("Service")) entry.layers.add("Service");
