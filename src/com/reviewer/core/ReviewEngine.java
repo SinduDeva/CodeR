@@ -441,14 +441,12 @@ public class ReviewEngine {
                 if (config.enableTransitiveApiDiscovery && !isController && !touchedMethods.isEmpty()) {
                     debug("Attempting transitive controller discovery for " + classInfo.fqn);
                     Set<String> existingEndpoints = new HashSet<>(entry.endpoints);
-                    List<String> callChainNotes = new ArrayList<>();
                     List<String> transitiveEndpoints = discoverTransitiveControllerEndpoints(
                             classInfo,
                             touchedMethods,
                             config.transitiveApiDiscoveryMaxDepth,
                             config.transitiveApiDiscoveryMaxVisitedFiles,
-                            config.transitiveApiDiscoveryMaxControllers,
-                            callChainNotes
+                            config.transitiveApiDiscoveryMaxControllers
                     );
                     if (!transitiveEndpoints.isEmpty()) {
                         if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
@@ -458,9 +456,6 @@ public class ReviewEngine {
                             }
                         }
                     }
-                    // Always surface the verified call-graph hops as notes so the developer
-                    // can see how far impact propagates even when no endpoint is reached.
-                    entry.notes.addAll(callChainNotes);
                 }
                 if (entry.hasSignal()) impact.add(entry);
             } catch (IOException ignored) {}
@@ -468,7 +463,7 @@ public class ReviewEngine {
         return impact;
     }
 
-    private List<String> discoverTransitiveControllerEndpoints(JavaSymbolIndex.ClassInfo startClass, List<String> initialTouchedMethods, int maxDepth, int maxVisitedFiles, int maxControllers, List<String> outCallChainNotes) {
+    private List<String> discoverTransitiveControllerEndpoints(JavaSymbolIndex.ClassInfo startClass, List<String> initialTouchedMethods, int maxDepth, int maxVisitedFiles, int maxControllers) {
         if (startClass == null || reverseDependencyGraph == null || reverseDependencyGraph.isEmpty()) {
             return Collections.emptyList();
         }
@@ -484,7 +479,7 @@ public class ReviewEngine {
         Set<String> visitedPaths = new HashSet<>();
         List<String> endpoints = new ArrayList<>();
 
-        queue.add(new TransitiveNode(startClass.fqn, ImpactAnalyzer.filterValidMethodNames(initialTouchedMethods), 0, startClass.supertypeSimpleNames, null));
+        queue.add(new TransitiveNode(startClass.fqn, ImpactAnalyzer.filterValidMethodNames(initialTouchedMethods), 0, startClass.supertypeSimpleNames));
         visitedFqns.add(startClass.fqn);
 
         int visitedFiles = 0;
@@ -493,10 +488,6 @@ public class ReviewEngine {
         while (!queue.isEmpty() && visitedFiles < maxVisitedFiles && foundControllers < maxControllers) {
             TransitiveNode node = queue.poll();
             if (node.depth >= maxDepth) continue;
-
-            // Emit the call-chain note here (not at enqueue) so notes only appear for nodes
-            // that actually pass the depth guard and are processed.
-            if (node.callChainNote != null) outCallChainNotes.add(node.callChainNote);
 
             if (node.impactedMethods == null || node.impactedMethods.isEmpty()) {
                 continue;
@@ -579,17 +570,7 @@ public class ReviewEngine {
                     if (!visitedFqns.add(fqnMethodsKey)) {
                         continue;
                     }
-                    // Record this hop in the call chain regardless of whether it reaches an endpoint.
-                    // The reverse graph confirmed it depends on the target; the token search confirmed
-                    // it calls the touched methods — so it is a real, verified hop in the impact path.
-                    String methodSummary = callingMethods.size() == 1
-                            ? callingMethods.get(0) + "()"
-                            : callingMethods.subList(0, Math.min(2, callingMethods.size()))
-                                    .stream().map(m -> m + "()").collect(Collectors.joining(", "))
-                              + (callingMethods.size() > 2 ? ", +" + (callingMethods.size() - 2) + " more" : "");
-                    String note = "Transitive caller [depth " + (node.depth + 1) + "]: "
-                            + depInfo.simpleName + "." + methodSummary;
-                    queue.add(new TransitiveNode(depInfo.fqn, callingMethods, node.depth + 1, depInfo.supertypeSimpleNames, note));
+                    queue.add(new TransitiveNode(depInfo.fqn, callingMethods, node.depth + 1, depInfo.supertypeSimpleNames));
                 }
             }
         }
@@ -670,14 +651,11 @@ public class ReviewEngine {
         final int depth;
         /** Simple names of the target's supertypes/interfaces for interface-injection detection. */
         final List<String> supertypeSimpleNames;
-        /** Human-readable call-chain note for this node; emitted only if the node passes the depth guard. */
-        final String callChainNote;
-        TransitiveNode(String fqn, List<String> impactedMethods, int depth, List<String> supertypeSimpleNames, String callChainNote) {
+        TransitiveNode(String fqn, List<String> impactedMethods, int depth, List<String> supertypeSimpleNames) {
             this.fqn = fqn;
             this.impactedMethods = impactedMethods;
             this.depth = depth;
             this.supertypeSimpleNames = supertypeSimpleNames != null ? supertypeSimpleNames : Collections.emptyList();
-            this.callChainNote = callChainNote;
         }
     }
 
