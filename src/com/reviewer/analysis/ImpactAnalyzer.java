@@ -604,6 +604,48 @@ public class ImpactAnalyzer {
     }
 
     /**
+     * Expands {@code methodNames} to include every method in the same class that
+     * transitively calls any of them (intra-class delegation resolution).
+     *
+     * <p>This handles the common pattern where a private helper directly invokes an
+     * external dependency, while a public method delegates to that private helper.
+     * Without expansion the BFS only tracks the private name, which no upstream
+     * caller ever invokes, so the chain dies.  With expansion the public method is
+     * also included and the next BFS hop succeeds.
+     *
+     * <p>Bounded to 5 passes; terminates early when no new callers are found.
+     */
+    public static List<String> expandWithIntraClassCallers(String content, List<String> methodNames) {
+        if (content == null || methodNames == null || methodNames.isEmpty()) return methodNames;
+        List<MethodSpan> spans = buildMethodSpans(content);
+        if (spans.isEmpty()) return methodNames;
+
+        Set<String> expanded = new LinkedHashSet<>(methodNames);
+        Set<String> frontier = new LinkedHashSet<>(methodNames);
+
+        for (int pass = 0; pass < 5 && !frontier.isEmpty(); pass++) {
+            Set<String> nextFrontier = new LinkedHashSet<>();
+            for (MethodSpan span : spans) {
+                if (expanded.contains(span.name)) continue;
+                String body = content.substring(span.start, span.endExclusive);
+                for (String tm : frontier) {
+                    String pure = tm.split("\\(")[0].trim();
+                    if (!isValidMethodName(pure)) continue;
+                    // Unqualified call  pure(  or method-reference  ::pure
+                    if (body.contains(pure + "(") || body.contains("::" + pure)) {
+                        if (expanded.add(span.name)) {
+                            nextFrontier.add(span.name);
+                        }
+                        break;
+                    }
+                }
+            }
+            frontier = nextFrontier;
+        }
+        return new ArrayList<>(expanded);
+    }
+
+    /**
      * Parses {@code content} to find every method declaration's span [headerStart, bodyEnd).
      * Used by both token-based and structural call-site finders to locate enclosing methods.
      */

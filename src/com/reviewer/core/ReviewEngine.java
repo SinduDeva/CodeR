@@ -586,6 +586,18 @@ public class ReviewEngine {
                 callingMethods = ImpactAnalyzer.filterValidMethodNames(callingMethods);
                 debug("Transitive: found calling methods in " + depFileName + ": " + callingMethods);
 
+                // For non-controller intermediate nodes, expand callingMethods to include any
+                // method in the same class that delegates to one of the found callers.
+                // This resolves the common pattern: privateHelper() calls external.touchedMethod();
+                // publicApi() calls privateHelper() — without expansion the BFS only tracks
+                // privateHelper, which no upstream file calls, so the chain would die here.
+                if (!isController && !callingMethods.isEmpty()) {
+                    List<String> expanded = ImpactAnalyzer.expandWithIntraClassCallers(depContent, callingMethods);
+                    expanded = ImpactAnalyzer.filterValidMethodNames(expanded);
+                    debug("Transitive: intra-class expansion in " + depFileName + ": " + callingMethods + " -> " + expanded);
+                    callingMethods = expanded;
+                }
+
                 if (callingMethods.isEmpty()) {
                     continue;
                 }
