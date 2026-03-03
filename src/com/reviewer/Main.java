@@ -140,6 +140,8 @@ public class Main {
         config.graphCacheTtlHours = Integer.parseInt(props.getProperty("graph.cache.ttl.hours", String.valueOf(config.graphCacheTtlHours)));
         config.transitiveCallerStructuralFallback = Boolean.parseBoolean(props.getProperty("transitive.caller.structural.fallback", String.valueOf(config.transitiveCallerStructuralFallback)));
         config.useAstCallerDetection = Boolean.parseBoolean(props.getProperty("use.ast.caller.detection", String.valueOf(config.useAstCallerDetection)));
+        config.openApiSpecPaths = props.getProperty("openapi.spec.paths", config.openApiSpecPaths);
+        config.openApiDelegateSuffix = props.getProperty("openapi.delegate.suffix", config.openApiDelegateSuffix);
     }
 
     private static void openReport(String reportPath) {

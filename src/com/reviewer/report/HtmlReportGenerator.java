@@ -699,14 +699,37 @@ public class HtmlReportGenerator {
         //appendImpactSummary(html, impact, displayFunctions, displayNotes);
         appendFloatingSummaryBox(html, impact, displayFunctions, displayNotes);
 
-        String apiSubtitle = "Endpoints touched";
-        boolean hasPotential = impact.endpoints.stream().anyMatch(e -> e != null && e.startsWith("Potential:"));
-        if (hasPotential) {
-            apiSubtitle = "Endpoints touched (includes Potential)";
+        // Display segregated APIs by touched method if multiple methods changed
+        if (impact.endpointsByMethod.size() > 1) {
+            for (Map.Entry<String, List<String>> entry : impact.endpointsByMethod.entrySet()) {
+                String methodName = entry.getKey();
+                List<String> endpoints = entry.getValue();
+                String subtitle = "Impacted by " + methodName + "()";
+                appendCollapsibleList(html, "Impacted APIs", subtitle, endpoints, "api");
+            }
+        } else {
+            String apiSubtitle = "Endpoints touched";
+            boolean hasPotential = impact.endpoints.stream().anyMatch(e -> e != null && e.startsWith("Potential:"));
+            if (hasPotential) {
+                apiSubtitle = "Endpoints touched (includes Potential)";
+            }
+            appendCollapsibleList(html, "Impacted APIs", apiSubtitle, impact.endpoints, "api");
         }
-        appendCollapsibleList(html, "Impacted APIs", apiSubtitle, impact.endpoints, "api");
-        appendCollapsibleList(html, "Modified Methods", methodSummarySubtitle(displayNotes, displayFunctions.size()), displayFunctions, "methods");
-        appendCollapsibleList(html, "Impact Notes", "Contextual insights", displayNotes, "notes");
+        
+        // appendCollapsibleList(html, "Modified Methods", methodSummarySubtitle(displayNotes, displayFunctions.size()), displayFunctions, "methods");
+        appendCollapsibleList(html, "Modified Methods", "", displayFunctions, "methods");
+        
+        // Display segregated impact notes by touched method if available
+        if (impact.notesByMethod.size() > 1) {
+            for (Map.Entry<String, List<String>> entry : impact.notesByMethod.entrySet()) {
+                String methodName = entry.getKey();
+                List<String> notes = entry.getValue();
+                String subtitle = "Context for " + methodName + "()";
+                appendCollapsibleList(html, "Impact Notes", subtitle, notes, "notes");
+            }
+        } else {
+            appendCollapsibleList(html, "Impact Notes", "Contextual insights", displayNotes, "notes");
+        }
         appendCollapsibleList(html, "Related Tests", impact.recommendedTests.isEmpty() ? "No mapped tests" : "Tests to run", impact.recommendedTests, "tests");
 
         // Dependency Graph Visualization

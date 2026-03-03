@@ -2,6 +2,7 @@ package com.reviewer.core;
 
 import com.reviewer.analysis.ImpactAnalyzer;
 import com.reviewer.analysis.JavaSymbolIndex;
+import com.reviewer.analysis.OpenApiSpecParser;
 import com.reviewer.analysis.RuleEngine;
 import com.reviewer.model.Models.*;
 import com.reviewer.util.ColorConsole;
@@ -35,11 +36,260 @@ public class ReviewEngine {
     private Path repoRoot;
     private final Path CACHE_DIR = Paths.get(".code-reviewer-cache");
     private final Path GRAPH_CACHE = CACHE_DIR.resolve("reverse-graph.json");
+    /**
+     * Populated lazily from {@code openapi.spec.paths} config.
+     * Maps operationId → "HTTP_METHOD /path" (e.g. "processAffiliateLead" → "POST /affiliate/v1/lead").
+     */
+    private Map<String, String> openApiOperationMap = null;
 
     public ReviewEngine(Config config) {
         this.config = config;
         this.repoRoot = resolveRepoRoot();
         initializeBranch();
+    }
+
+    /**
+     * Lazily loads and returns the OpenAPI operation map.
+     *
+     * <p>Resolution order:
+     * <ol>
+     *   <li>If {@code openapi.spec.paths} is set, expand each comma-separated entry as a glob
+     *       pattern relative to the repo root (e.g. {@code apispec/*.yml}, {@code **\/openapi\/*.yaml}).
+     *       Exact paths without wildcards are also accepted.</li>
+     *   <li>If {@code openapi.spec.paths} is blank, auto-discover spec files by scanning the repo
+     *       for common OpenAPI file locations and naming conventions.</li>
+     * </ol>
+     */
+    private Map<String, String> getOpenApiOperationMap() {
+        if (openApiOperationMap != null) return openApiOperationMap;
+        List<Path> specPaths;
+        if (config != null && config.openApiSpecPaths != null && !config.openApiSpecPaths.isBlank()) {
+            specPaths = resolveOpenApiGlobs(config.openApiSpecPaths);
+        } else {
+            specPaths = autoDiscoverOpenApiSpecs();
+        }
+        openApiOperationMap = OpenApiSpecParser.parseAll(specPaths);
+        if (!openApiOperationMap.isEmpty()) {
+            debug("OpenAPI operation map loaded: " + openApiOperationMap.size() + " operations from " + specPaths.size() + " spec(s)");
+        }
+        return openApiOperationMap;
+    }
+
+    /**
+     * Expands a comma-separated list of glob patterns (relative to repo root) into resolved paths.
+     * Supports both exact paths and glob wildcards (* and **).
+     */
+    private List<Path> resolveOpenApiGlobs(String specPathsConfig) {
+        List<Path> result = new ArrayList<>();
+        for (String raw : specPathsConfig.split(",")) {
+            String pattern = raw.trim();
+            if (pattern.isEmpty()) continue;
+            // Normalize path separators for glob matching on all OSes
+            pattern = pattern.replace('\\', '/');
+            if (!pattern.contains("*") && !pattern.contains("?")) {
+                // Exact path — no glob expansion needed
+                Path candidate = repoRoot.resolve(pattern).normalize();
+                if (Files.exists(candidate) && Files.isRegularFile(candidate)) {
+                    result.add(candidate);
+                    debug("OpenAPI spec (exact): " + candidate);
+                } else {
+                    debug("OpenAPI spec path not found: " + candidate);
+                }
+            } else {
+                // Glob pattern — walk the repo and collect matches
+                java.nio.file.PathMatcher matcher = repoRoot.getFileSystem()
+                        .getPathMatcher("glob:" + repoRoot.toString().replace('\\', '/') + "/" + pattern);
+                try (Stream<Path> walk = Files.walk(repoRoot)) {
+                    walk.filter(Files::isRegularFile)
+                        .filter(p -> {
+                            String normalized = p.toAbsolutePath().normalize().toString().replace('\\', '/');
+                            return matcher.matches(java.nio.file.Paths.get(normalized));
+                        })
+                        .forEach(p -> {
+                            result.add(p);
+                            debug("OpenAPI spec (glob match): " + p);
+                        });
+                } catch (IOException e) {
+                    debug("OpenAPI glob expansion failed for '" + pattern + "': " + e.getMessage());
+                }
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Auto-discovers OpenAPI/Swagger spec files in the repo by scanning well-known locations
+     * and file naming conventions when no explicit {@code openapi.spec.paths} is configured.
+     *
+     * <p>Recognized patterns:
+     * <ul>
+     *   <li>Any {@code .yml} / {@code .yaml} file whose name or content signals OpenAPI:
+     *       name contains {@code openapi}, {@code swagger}, {@code api-spec}, {@code apispec},
+     *       or the file content starts with {@code openapi:} / {@code swagger:}.</li>
+     *   <li>Common locations searched first: {@code apispec/}, {@code src/main/resources/},
+     *       {@code swagger/}, {@code openapi/}, {@code api/}, {@code docs/}.</li>
+     * </ul>
+     * Stops at 20 files to avoid runaway scanning on large repos.
+     */
+    private List<Path> autoDiscoverOpenApiSpecs() {
+        List<Path> found = new ArrayList<>();
+        // Well-known directories to probe first (short-circuit for typical layouts)
+        List<String> preferredDirs = List.of(
+            "apispec", "openapi", "swagger", "api", "api-spec",
+            "src/main/resources", "src/main/resources/openapi",
+            "src/main/resources/swagger", "src/main/resources/static",
+            "docs", "spec", "specs"
+        );
+        Set<Path> visited = new LinkedHashSet<>();
+        // First pass: preferred directories
+        for (String dir : preferredDirs) {
+            Path candidate = repoRoot.resolve(dir);
+            if (!Files.isDirectory(candidate)) continue;
+            try (Stream<Path> stream = Files.walk(candidate, 3)) {
+                stream.filter(Files::isRegularFile)
+                      .filter(p -> isOpenApiFile(p))
+                      .forEach(p -> { if (visited.add(p)) found.add(p); });
+            } catch (IOException ignored) {}
+            if (found.size() >= 20) break;
+        }
+        // Second pass: broad repo scan if nothing found yet (cap at 20 matches)
+        if (found.isEmpty()) {
+            try (Stream<Path> walk = Files.walk(repoRoot, 8)) {
+                walk.filter(Files::isRegularFile)
+                    .filter(p -> !p.toString().replace('\\', '/').contains("/target/"))
+                    .filter(p -> !p.toString().replace('\\', '/').contains("/build/"))
+                    .filter(p -> !p.toString().replace('\\', '/').contains("/.git/"))
+                    .filter(p -> isOpenApiFile(p))
+                    .limit(20)
+                    .forEach(p -> { if (visited.add(p)) found.add(p); });
+            } catch (IOException ignored) {}
+        }
+        if (!found.isEmpty()) {
+            debug("OpenAPI auto-discovered " + found.size() + " spec file(s): " + found);
+        } else {
+            debug("OpenAPI auto-discovery: no spec files found");
+        }
+        return found;
+    }
+
+    /**
+     * Returns true if {@code path} is a YAML file that looks like an OpenAPI/Swagger spec.
+     * Checks filename first; if inconclusive, peeks at the first 512 bytes of content.
+     */
+    private static boolean isOpenApiFile(Path path) {
+        String name = path.getFileName().toString().toLowerCase();
+        if (!name.endsWith(".yml") && !name.endsWith(".yaml")) return false;
+        // Filename signals
+        if (name.contains("openapi") || name.contains("swagger") ||
+            name.contains("api-spec") || name.contains("apispec") ||
+            name.contains("api-config") || name.contains("apiconfig")) {
+            return true;
+        }
+        // Content peek — look for top-level 'openapi:' or 'swagger:' key
+        try {
+            byte[] buf = new byte[512];
+            int read;
+            try (java.io.InputStream is = Files.newInputStream(path)) {
+                read = is.read(buf);
+            }
+            if (read > 0) {
+                String head = new String(buf, 0, read, java.nio.charset.StandardCharsets.UTF_8);
+                if (head.contains("openapi:") || head.contains("swagger:") || head.contains("paths:")) {
+                    return true;
+                }
+            }
+        } catch (IOException ignored) {}
+        return false;
+    }
+
+    /**
+     * Returns true if {@code content} declares that the class implements one or more
+     * interfaces whose name ends with {@code delegateSuffix} (e.g. "ApiDelegate").
+     * Checks both the implements clause and class-level @Component/@Service annotations
+     * to handle generated Spring delegate wiring.
+     */
+    private static boolean implementsApiDelegate(String content, String delegateSuffix) {
+        if (content == null || content.isBlank() || delegateSuffix == null || delegateSuffix.isBlank()) return false;
+        Pattern p = Pattern.compile("\\bimplements\\b[^{]*\\b\\w+" + Pattern.quote(delegateSuffix) + "\\b");
+        return p.matcher(content).find();
+    }
+
+    /**
+     * Extracts the simple names of all *ApiDelegate interfaces that {@code content} implements.
+     * Example: "class Foo implements ProcessAffiliateLeadApiDelegate, OtherApiDelegate"
+     * → ["ProcessAffiliateLeadApiDelegate", "OtherApiDelegate"]
+     */
+    private static List<String> extractDelegateInterfaces(String content, String delegateSuffix) {
+        List<String> delegates = new ArrayList<>();
+        if (content == null || content.isBlank() || delegateSuffix == null || delegateSuffix.isBlank()) return delegates;
+        Pattern implClause = Pattern.compile("\\bimplements\\b([^{]+)");
+        Matcher m = implClause.matcher(content);
+        if (!m.find()) return delegates;
+        String[] tokens = m.group(1).split("[,\\s]+");
+        for (String token : tokens) {
+            String t = token.trim().replaceAll("<.*>", "");
+            if (t.endsWith(delegateSuffix)) delegates.add(t);
+        }
+        return delegates;
+    }
+
+    /**
+     * Resolves OpenAPI endpoints for a delegate implementation class in two modes:
+     *
+     * <p><b>Direct mode</b> (changed file is itself the delegate impl): match {@code touchedMethods}
+     * directly against operationIds — the developer changed the operationId method body itself.
+     *
+     * <p><b>Transitive mode</b> (delegate is a dependent that was reached via call graph):
+     * {@code touchedMethods} / {@code callingMethods} are <em>internal</em> methods of the delegate
+     * class (e.g. {@code findAffiliateHandlerUsingTokenAndProcessRequest}, {@code processLTFlow})
+     * and will never match an operationId. Instead, scan the delegate class {@code content} for
+     * method declarations whose names are known operationIds in the spec — those are the true HTTP
+     * entry points regardless of which internal method was called transitively.
+     *
+     * <p>Both modes are tried; results are de-duplicated.
+     */
+    private List<String> resolveOpenApiEndpoints(List<String> delegateInterfaces,
+                                                  List<String> touchedMethods,
+                                                  Map<String, String> opMap,
+                                                  String className,
+                                                  String classContent) {
+        List<String> endpoints = new ArrayList<>();
+        if (delegateInterfaces.isEmpty() || opMap.isEmpty()) return endpoints;
+
+        // Mode 1: direct — touched method name IS the operationId (changed the delegate method itself)
+        for (String method : touchedMethods) {
+            String pure = method.split("\\(")[0].trim();
+            if (opMap.containsKey(pure)) {
+                String httpPathEntry = opMap.get(pure);
+                String ep = className + "." + pure + " [" + httpPathEntry + "]";
+                if (!endpoints.contains(ep)) endpoints.add(ep);
+                debug("OpenAPI delegate match (direct): " + pure + " → " + httpPathEntry + " in " + className);
+            }
+        }
+
+        // Mode 2: transitive — scan class content for method declarations matching operationIds.
+        // Used when callingMethods are internal helpers; the OpenAPI entry point method is
+        // declared in the same class and matches an operationId in the spec.
+        if (classContent != null && !classContent.isBlank()) {
+            // Match method declarations: (public|protected|...) <returnType> <methodName>(
+            Pattern methodDecl = Pattern.compile(
+                "(?:^|\\n)\\s*(?:@Override\\s+)?(?:public|protected|private)?\\s+[\\w<>\\[\\],\\s]+\\s+(\\w+)\\s*\\(",
+                Pattern.MULTILINE);
+            Matcher m = methodDecl.matcher(classContent);
+            while (m.find()) {
+                String declaredMethod = m.group(1);
+                if (opMap.containsKey(declaredMethod)) {
+                    String httpPathEntry = opMap.get(declaredMethod);
+                    String ep = className + "." + declaredMethod + " [" + httpPathEntry + "]";
+                    if (!endpoints.contains(ep)) {
+                        endpoints.add(ep);
+                        debug("OpenAPI delegate match (declared): " + declaredMethod + " → " + httpPathEntry + " in " + className);
+                    }
+                }
+            }
+        }
+
+        return endpoints;
     }
 
     private void debug(String message) {
@@ -409,6 +659,21 @@ public class ReviewEngine {
                     }
                 }
 
+                // OpenAPI delegate detection: changed file itself implements *ApiDelegate
+                if (!touchedMethods.isEmpty() && implementsApiDelegate(content, config.openApiDelegateSuffix)) {
+                    Map<String, String> opMap = getOpenApiOperationMap();
+                    List<String> delegateInterfaces = extractDelegateInterfaces(content, config.openApiDelegateSuffix);
+                    debug("OpenAPI delegate interfaces in " + className + ": " + delegateInterfaces);
+                    // Direct mode: developer changed this file, so touched methods may be operationId methods directly.
+                    // Also scan full content in case they changed an internal helper — surface all exposed operationIds.
+                    List<String> openApiEndpoints = resolveOpenApiEndpoints(delegateInterfaces, touchedMethods, opMap, className, content);
+                    if (!openApiEndpoints.isEmpty()) {
+                        if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
+                        entry.endpoints.addAll(openApiEndpoints);
+                        debug("OpenAPI endpoints added for " + className + ": " + openApiEndpoints);
+                    }
+                }
+
                 Set<String> dependents = reverseDependencyGraph.getOrDefault(classInfo.fqn, Collections.emptySet());
                 debug("Dependents for " + classInfo.fqn + ": " + dependents);
                 for (String dependentFile : dependents) {
@@ -491,6 +756,24 @@ public class ReviewEngine {
                                     entry.endpoints.addAll(endpoints);
                                 }
                             }
+                        } else if (implementsApiDelegate(depContent, config.openApiDelegateSuffix)) {
+                            // Dependent is an OpenAPI delegate impl — scan its content for declared operationId methods.
+                            // callingMethods here are internal helpers (e.g. findAffiliateHandlerUsingTokenAndProcessRequest),
+                            // NOT the operationId entry points. Scan the class to find which operationIds it declares.
+                            Map<String, String> opMap = getOpenApiOperationMap();
+                            List<String> depDelegateInterfaces = extractDelegateInterfaces(depContent, config.openApiDelegateSuffix);
+                            debug("OpenAPI delegate interfaces in dependent " + depClassName + ": " + depDelegateInterfaces);
+                            // Use content-scanning overload so internal callingMethods also trigger operationId scan
+                            List<String> openApiEps = resolveOpenApiEndpoints(depDelegateInterfaces, callingMethods, opMap, depClassName, depContent);
+                            if (!openApiEps.isEmpty()) {
+                                if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
+                                if (multiTouched) {
+                                    String via = " [via " + touchedMethods.stream().map(m -> m + "()").collect(Collectors.joining(", ")) + "]";
+                                    for (String ep : openApiEps) entry.endpoints.add(ep + via);
+                                } else {
+                                    entry.endpoints.addAll(openApiEps);
+                                }
+                            }
                         } else if (depContent.contains("@Service")) {
                             if (!entry.layers.contains("Service")) entry.layers.add("Service");
                         }
@@ -501,18 +784,23 @@ public class ReviewEngine {
                 if (config.enableTransitiveApiDiscovery && !isController && !touchedMethods.isEmpty()) {
                     debug("Attempting transitive controller discovery for " + classInfo.fqn);
                     Set<String> existingEndpoints = new HashSet<>(entry.endpoints);
-                    List<String> transitiveEndpoints = discoverTransitiveControllerEndpoints(
+                    Map<String, List<String>> endpointsByMethod = discoverTransitiveControllerEndpointsByMethod(
                             classInfo,
                             touchedMethods,
                             config.transitiveApiDiscoveryMaxDepth,
                             config.transitiveApiDiscoveryMaxVisitedFiles,
                             config.transitiveApiDiscoveryMaxControllers
                     );
-                    if (!transitiveEndpoints.isEmpty()) {
+                    if (!endpointsByMethod.isEmpty()) {
                         if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
-                        for (String ep : transitiveEndpoints) {
-                            if (!existingEndpoints.contains(ep)) {
-                                entry.endpoints.add(ep);
+                        for (Map.Entry<String, List<String>> methodEntry : endpointsByMethod.entrySet()) {
+                            String touchedMethod = methodEntry.getKey();
+                            List<String> endpoints = methodEntry.getValue();
+                            entry.endpointsByMethod.computeIfAbsent(touchedMethod, k -> new ArrayList<>()).addAll(endpoints);
+                            for (String ep : endpoints) {
+                                if (!existingEndpoints.contains(ep)) {
+                                    entry.endpoints.add(ep);
+                                }
                             }
                         }
                     }
@@ -521,6 +809,17 @@ public class ReviewEngine {
             } catch (IOException ignored) {}
         }
         return impact;
+    }
+
+    private Map<String, List<String>> discoverTransitiveControllerEndpointsByMethod(JavaSymbolIndex.ClassInfo startClass, List<String> initialTouchedMethods, int maxDepth, int maxVisitedFiles, int maxControllers) {
+        Map<String, List<String>> result = new LinkedHashMap<>();
+        for (String touchedMethod : initialTouchedMethods) {
+            List<String> endpoints = discoverTransitiveControllerEndpoints(startClass, Collections.singletonList(touchedMethod), maxDepth, maxVisitedFiles, maxControllers);
+            if (!endpoints.isEmpty()) {
+                result.put(touchedMethod, endpoints);
+            }
+        }
+        return result;
     }
 
     private List<String> discoverTransitiveControllerEndpoints(JavaSymbolIndex.ClassInfo startClass, List<String> initialTouchedMethods, int maxDepth, int maxVisitedFiles, int maxControllers) {
@@ -588,14 +887,20 @@ public class ReviewEngine {
                 // structural scan would return every controller method that injects the service and
                 // surface unrelated endpoints.
                 boolean isController = depContent.contains("@RestController") || depContent.contains("@Controller");
+                boolean isApiDelegate = implementsApiDelegate(depContent, config.openApiDelegateSuffix);
+                // Only pure @RestController/@Controller is a terminal node for call-matching purposes.
+                // OpenAPI delegates are BOTH endpoint sources AND intermediate nodes: they emit OpenAPI
+                // endpoints AND get re-enqueued so @RestController callers above them are also found.
+                // So for getMethodsCalling / intra-class expansion / visitKey, treat delegates like
+                // intermediate nodes (confirmedDependent=true, expand callers, file-based visitKey).
                 String currentSimpleName = simpleNameFromFqn(node.fqn);
                 debug("Transitive: checking " + depFileName + " for calls to " + currentSimpleName + "." + node.impactedMethods);
                 List<String> callingMethods = ImpactAnalyzer.getMethodsCalling(depContent, currentSimpleName, node.fqn, node.supertypeSimpleNames, node.impactedMethods, false, !isController);
                 callingMethods = ImpactAnalyzer.filterValidMethodNames(callingMethods);
                 debug("Transitive: found calling methods in " + depFileName + ": " + callingMethods);
 
-                // For non-controller intermediate nodes, expand callingMethods to include any
-                // method in the same class that delegates to one of the found callers.
+                // For non-controller nodes (including OpenAPI delegates), expand callingMethods to
+                // include any method in the same class that delegates to one of the found callers.
                 // This resolves the common pattern: privateHelper() calls external.touchedMethod();
                 // publicApi() calls privateHelper() — without expansion the BFS only tracks
                 // privateHelper, which no upstream file calls, so the chain would die here.
@@ -611,7 +916,8 @@ public class ReviewEngine {
                 }
 
                 // Mark visited only when we have a proven call-chain.
-                // For controllers, we use a different key (fqn + methods) so we can revisit with different calling methods
+                // For @RestController, use (fqn + methods) key so we can revisit with different calling methods.
+                // For delegates and intermediate nodes use file path — they will be re-enqueued via visitedFqns key.
                 String visitKey = isController ? (depInfo.fqn + ":" + callingMethods.toString()) : dependentFile;
                 if (!visitedPaths.add(visitKey)) {
                     debug("Transitive: skipping already-processed " + depFileName + " with methods " + callingMethods);
@@ -635,6 +941,29 @@ public class ReviewEngine {
                         controllerEndpoints = ImpactAnalyzer.extractControllerEndpoints(depContent, depInfo.simpleName, callerScope);
                     }
                     if (controllerEndpoints != null) endpoints.addAll(controllerEndpoints);
+                } else if (isApiDelegate) {
+                    // Emit OpenAPI endpoints for this delegate — it IS an API entry point.
+                    Map<String, String> opMap = getOpenApiOperationMap();
+                    List<String> depDelegateInterfaces = extractDelegateInterfaces(depContent, config.openApiDelegateSuffix);
+                    debug("Transitive: OpenAPI delegate " + depFileName + " interfaces=" + depDelegateInterfaces + " callingMethods=" + callingMethods);
+                    // callingMethods are internal methods of the delegate (e.g. findAffiliateHandlerUsingTokenAndProcessRequest).
+                    // Scan the delegate class content to find the operationId method(s) it declares — those are the real entry points.
+                    List<String> openApiEps = resolveOpenApiEndpoints(depDelegateInterfaces, callingMethods, opMap, depInfo.simpleName, depContent);
+                    endpoints.addAll(openApiEps);
+                    // Also continue BFS traversal: the delegate can itself be called by @RestController
+                    // methods (e.g. AffiliateController.processLTV2 → AffiliateRequestHandler.processLTFlow
+                    // → GroupThreeFlow.processLead). Stopping here would miss those controller endpoints.
+                    // Expand callingMethods with intra-class callers so the BFS can traverse upward through
+                    // the delegate's public entry points (including the operationId methods themselves).
+                    List<String> expandedForBfs = ImpactAnalyzer.expandWithIntraClassCallers(depContent, callingMethods);
+                    expandedForBfs = ImpactAnalyzer.filterValidMethodNames(expandedForBfs);
+                    List<String> sortedMethods = new java.util.ArrayList<>(expandedForBfs);
+                    java.util.Collections.sort(sortedMethods);
+                    String fqnMethodsKey = depInfo.fqn + "|" + sortedMethods;
+                    if (visitedFqns.add(fqnMethodsKey)) {
+                        debug("Transitive: enqueuing OpenAPI delegate " + depFileName + " for further BFS with methods " + expandedForBfs);
+                        queue.add(new TransitiveNode(depInfo.fqn, expandedForBfs, node.depth + 1, depInfo.supertypeSimpleNames));
+                    }
                 } else {
                     // Key by (fqn + sorted touched methods) so the same class can be re-enqueued
                     // when reached via a different call path carrying different methods.

@@ -126,6 +126,15 @@ public class Models {
          * {@link Config#methodScopedDependencyGraph} is {@code true}.
          */
         public final List<String> methodScopedDependents = new ArrayList<>();
+        /**
+         * Maps touched method names to the endpoints/APIs impacted by that specific method.
+         * Used to segregate the impact report when multiple methods are changed.
+         */
+        public final Map<String, List<String>> endpointsByMethod = new LinkedHashMap<>();
+        /**
+         * Maps touched method names to impact notes specific to that method.
+         */
+        public final Map<String, List<String>> notesByMethod = new LinkedHashMap<>();
 
         public ImpactEntry(String fileName) {
             this.fileName = fileName;
@@ -209,5 +218,18 @@ public class Models {
          * refactors done earlier in the same day.
          */
         public int graphCacheTtlHours = 12;
+        /**
+         * Comma-separated list of OpenAPI/Swagger spec file paths relative to the repo root.
+         * Example: apispec/affiliate-config.yml,apispec/other-service.yml
+         * When set, the tool parses these specs to build an operationId→{HTTP_METHOD path} map
+         * and uses it to identify impacted APIs for classes implementing *ApiDelegate interfaces.
+         */
+        public String openApiSpecPaths = "";
+        /**
+         * Suffix that identifies OpenAPI-generated delegate interfaces.
+         * Default: ApiDelegate  (matches ProcessAffiliateLeadApiDelegate, GenerateAuthenticationTokenApiDelegate, etc.)
+         * Change if your code-generator uses a different suffix.
+         */
+        public String openApiDelegateSuffix = "ApiDelegate";
     }
 }

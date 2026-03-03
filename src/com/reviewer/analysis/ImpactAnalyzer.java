@@ -265,24 +265,24 @@ public class ImpactAnalyzer {
         }
         if (!hasAnyTouchedToken) {
             // None of the touched method names appear literally in this file.
-            // When confirmedDependent=true (reverse graph already verified dependency), run
-            // structural fallback to find ANY calls on the target, enabling transitive BFS.
-            // When confirmedDependent=false, respect the structural fallback config flag.
-            boolean shouldRunStructural = confirmedDependent || structuralFallbackEnabled;
-            if (!shouldRunStructural) {
-                debug("[DEBUG] getMethodsCallingImpl: no touched tokens, structural fallback disabled, not a confirmed dependent — skipping. target=" + targetSimpleName);
+            // When structural fallback is disabled, we require exact method name matches to prevent
+            // false positives in the transitive call chain. Even if this is a confirmed dependent
+            // (reverse graph shows a dependency), we don't want to propagate methods that don't
+            // actually call the touched methods - that would pollute the BFS with unrelated paths.
+            if (!structuralFallbackEnabled) {
+                debug("[DEBUG] getMethodsCallingImpl: no touched tokens, structural fallback disabled — skipping. target=" + targetSimpleName);
                 return Collections.emptyList();
             }
-            // Structural analysis is enabled (either via confirmedDependent or config):
-            // check whether the target is even referenced before paying the cost of a full scan.
+            // Structural analysis is enabled: check whether the target is even referenced before
+            // paying the cost of a full scan.
             boolean likelyRef = isLikelyTargetReferencedInFile(content, targetSimpleName, targetFqn);
             if (!likelyRef) {
                 debug("[DEBUG] getMethodsCallingImpl: no tokens, no reference — skipping. target=" + targetSimpleName);
                 return Collections.emptyList();
             }
-            String reason = confirmedDependent ? "confirmed dependent" : "structural fallback enabled";
-            debug("[DEBUG] getMethodsCallingImpl: no touched tokens, " + reason + ". Running AST/structural scan. target=" + targetSimpleName);
-            List<String> structural = getMethodsUsingTarget(content, targetSimpleName, targetFqn, supertypeSimpleNames);
+            debug("[DEBUG] getMethodsCallingImpl: no touched tokens, structural fallback enabled. Running AST/structural scan. target=" + targetSimpleName);
+            // Pass touchedMethods to structural scan so it can filter to only methods calling those specific methods
+            List<String> structural = getMethodsUsingTarget(content, targetSimpleName, targetFqn, supertypeSimpleNames, touchedMethods);
             debug("[DEBUG] getMethodsCallingImpl: structural scan found " + structural.size() + " callers for target=" + targetSimpleName + ": " + structural);
             return structural;
         }
@@ -361,39 +361,45 @@ public class ImpactAnalyzer {
         // 4a. Broad fallback: anyQualifier.method(...)
         // This is intentionally looser than 4b. It helps when instance name extraction fails
         // (e.g., injection patterns, interface/supertype fields) but the method token exists.
+        // Only run this if we have evidence the target is actually used in this file.
         if (allowBroadFallback && callers.isEmpty()) {
-            for (String method : touchedMethods) {
-                String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
-                if (!isValidMethodName(pureMethodName)) {
-                    continue;
-                }
-                String anyQualifierCallPattern = "\\b\\w+\\s*\\.\\s*" + Pattern.quote(pureMethodName) + "\\b\\s*\\(";
-                Matcher aqm = Pattern.compile(anyQualifierCallPattern).matcher(content);
-                while (aqm.find()) {
-                    int callPos = aqm.start();
-                    String enclosing = findEnclosingMethod(methodsInFile, callPos);
-                    if (enclosing != null) callers.add(enclosing);
-                }
+            boolean likelyRef = isLikelyTargetReferencedInFile(content, targetSimpleName, targetFqn);
+            if (likelyRef) {
+                debug("[DEBUG] step 4a: running broad fallback (target likely referenced) for target=" + targetSimpleName);
+                for (String method : touchedMethods) {
+                    String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
+                    if (!isValidMethodName(pureMethodName)) {
+                        continue;
+                    }
+                    String anyQualifierCallPattern = "\\b\\w+\\s*\\.\\s*" + Pattern.quote(pureMethodName) + "\\b\\s*\\(";
+                    Matcher aqm = Pattern.compile(anyQualifierCallPattern).matcher(content);
+                    while (aqm.find()) {
+                        int callPos = aqm.start();
+                        String enclosing = findEnclosingMethod(methodsInFile, callPos);
+                        if (enclosing != null) callers.add(enclosing);
+                    }
 
-                String anyQualifierRefPattern = "\\b\\w+\\s*::\\s*" + Pattern.quote(pureMethodName) + "\\b";
-                Matcher arm = Pattern.compile(anyQualifierRefPattern).matcher(content);
-                while (arm.find()) {
-                    int callPos = arm.start();
-                    String enclosing = findEnclosingMethod(methodsInFile, callPos);
-                    if (enclosing != null) callers.add(enclosing);
+                    String anyQualifierRefPattern = "\\b\\w+\\s*::\\s*" + Pattern.quote(pureMethodName) + "\\b";
+                    Matcher arm = Pattern.compile(anyQualifierRefPattern).matcher(content);
+                    while (arm.find()) {
+                        int callPos = arm.start();
+                        String enclosing = findEnclosingMethod(methodsInFile, callPos);
+                        if (enclosing != null) callers.add(enclosing);
+                    }
                 }
+            } else {
+                debug("[DEBUG] step 4a: skipping broad fallback (target not referenced) for target=" + targetSimpleName);
             }
         }
 
         // 4b. Fallback qualified calls: *.method(...)
         // This helps when the target is referenced via an interface/supertype (instance name extraction may fail),
         // or when the call appears inside lambdas/streams but still uses dot-call syntax.
-        // Also run when hasAnyTouchedToken=true: even if the type isn't directly referenced in the file,
-        // if the file contains calls to the touched methods, they're likely inherited from a parent class
-        // and we should still try to find which methods in this file make those calls.
+        // Only run when likelyRef=true to avoid false positives from methods with the same name in different classes.
+        // This is a form of structural fallback, so respect the structural fallback configuration.
         boolean likelyRef = isLikelyTargetReferencedInFile(content, targetSimpleName, targetFqn);
-        if (callers.isEmpty() && (likelyRef || hasAnyTouchedToken)) {
-            debug("[DEBUG] step 4b: running (likelyRef=" + likelyRef + ", hasAnyTouchedToken=" + hasAnyTouchedToken + ") for target=" + targetSimpleName);
+        if (callers.isEmpty() && likelyRef && structuralFallbackEnabled) {
+            debug("[DEBUG] step 4b: running (likelyRef=" + likelyRef + ") for target=" + targetSimpleName);
             for (String method : touchedMethods) {
                 String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
                 if (!isValidMethodName(pureMethodName)) {
@@ -438,7 +444,8 @@ public class ImpactAnalyzer {
         // Only runs when we KNOW the method token is present in the file but all qualifier-based
         // steps came up empty.  findEnclosingMethod returns null for method *declarations*, so
         // we don't accidentally treat the declaring class as a caller of itself.
-        if (callers.isEmpty() && hasAnyTouchedToken) {
+        // This is a form of structural fallback, so respect the structural fallback configuration.
+        if (callers.isEmpty() && hasAnyTouchedToken && structuralFallbackEnabled) {
             debug("[DEBUG] step 4c: raw-token fallback for target=" + targetSimpleName);
             for (String method : touchedMethods) {
                 String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
@@ -687,61 +694,107 @@ public class ImpactAnalyzer {
     }
 
     /**
-     * Structural caller discovery: finds every method in {@code content} that makes
-     * <em>any</em> method call on a field or variable typed as the target class or one
-     * of its supertypes (interfaces/superclass).  Unlike {@link #getMethodsCallingImpl},
-     * this does NOT require knowing which specific methods were touched — it returns
-     * every method that interacts with the target type at all.
-     *
-     * <p>This is the primary mechanism when string-token matching fails (chained calls
-     * like {@code factory.get().method()}, lambda captures, interface proxies, Spring
-     * delegates, etc.) because the touched-method name simply does not appear literally
-     * in the dependent file's source.
-     *
-     * @return distinct names of methods whose bodies contain at least one
-     *         {@code instance.anyMethod(} or {@code instance::anyMethod} expression
-     *         on an instance of the target type
+     * Finds methods that use the target class in any way (broad structural scan).
+     * This is used as a fallback when touched method names don't appear literally.
+     * To avoid over-reporting, this now accepts touchedMethods and only returns methods
+     * that call at least one of those specific methods (if provided).
      */
-    public static List<String> getMethodsUsingTarget(
-            String content, String targetSimpleName, String targetFqn,
-            List<String> supertypeSimpleNames) {
-        if (content == null || content.isBlank()) return Collections.emptyList();
+    private static List<String> getMethodsUsingTarget(String content, String targetSimpleName, String targetFqn, List<String> supertypeSimpleNames, List<String> touchedMethods) {
+        if (content == null || content.isBlank()) {
+            return Collections.emptyList();
+        }
         Set<String> instanceNames = extractInstanceNames(content, targetSimpleName, targetFqn, supertypeSimpleNames);
-        // Also include the class name itself for static call sites (TargetClass.staticMethod(...))
-        if (targetSimpleName != null && !targetSimpleName.isBlank()) instanceNames.add(targetSimpleName.trim());
-        if (instanceNames.isEmpty()) return Collections.emptyList();
-
-        List<MethodSpan> spans = buildMethodSpans(content);
-        Set<String> callers = new LinkedHashSet<>();
-
-        for (String inst : instanceNames) {
-            if (inst == null || inst.isBlank()) continue;
-            // Dot-call: instance.anyMethod(
-            Pattern dotCall = Pattern.compile("\\b" + Pattern.quote(inst) + "\\s*\\.\\s*(\\w+)\\s*\\(");
-            Matcher dc = dotCall.matcher(content);
-            while (dc.find()) {
-                String enclosing = findEnclosingMethod(spans, dc.start());
-                if (enclosing != null) {
-                    debug("[DEBUG] getMethodsUsingTarget: " + inst + "." + dc.group(1) + "() in method " + enclosing);
-                    callers.add(enclosing);
+        if (targetSimpleName != null && !targetSimpleName.isBlank()) {
+            instanceNames.add(targetSimpleName.trim());
+        }
+        if (instanceNames.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<MethodSpan> methodsInFile = buildMethodSpans(content);
+        Set<String> callers = new HashSet<>();
+        
+        // If touchedMethods are provided, try to match them specifically first
+        if (touchedMethods != null && !touchedMethods.isEmpty()) {
+            for (String instanceName : instanceNames) {
+                if (instanceName == null || instanceName.isBlank()) continue;
+                for (String method : touchedMethods) {
+                    String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
+                    if (!isValidMethodName(pureMethodName)) continue;
+                    
+                    // Look for specific method calls
+                    String specificCallPattern = "\\b" + Pattern.quote(instanceName) + "\\s*\\.\\s*" + Pattern.quote(pureMethodName) + "\\b\\s*\\(";
+                    Pattern scp = Pattern.compile(specificCallPattern);
+                    Matcher scm = scp.matcher(content);
+                    while (scm.find()) {
+                        int callPos = scm.start();
+                        String enclosing = findEnclosingMethod(methodsInFile, callPos);
+                        debug("[DEBUG] getMethodsUsingTarget: " + instanceName + "." + pureMethodName + "() in method " + enclosing);
+                        if (enclosing != null) callers.add(enclosing);
+                    }
+                    
+                    // Look for method references
+                    String specificRefPattern = "\\b" + Pattern.quote(instanceName) + "\\s*::\\s*" + Pattern.quote(pureMethodName) + "\\b";
+                    Pattern srp = Pattern.compile(specificRefPattern);
+                    Matcher srm = srp.matcher(content);
+                    while (srm.find()) {
+                        int callPos = srm.start();
+                        String enclosing = findEnclosingMethod(methodsInFile, callPos);
+                        if (enclosing != null) callers.add(enclosing);
+                    }
                 }
             }
-            // Method reference: instance::anyMethod
-            Pattern ref = Pattern.compile("\\b" + Pattern.quote(inst) + "\\s*::\\s*(\\w+)\\b");
-            Matcher rm = ref.matcher(content);
+        }
+        
+        // If we found specific matches, return them
+        if (!callers.isEmpty()) {
+            debug("[DEBUG] getMethodsUsingTarget: target=" + targetSimpleName + " instances=" + instanceNames + " callers=" + callers);
+            return new ArrayList<>(callers);
+        }
+        
+        // If touchedMethods were provided but none matched, return empty (don't fall back to broad scan)
+        // This prevents over-reporting when the file uses the target class but doesn't call the changed methods
+        if (touchedMethods != null && !touchedMethods.isEmpty()) {
+            debug("[DEBUG] getMethodsUsingTarget: target=" + targetSimpleName + " touchedMethods provided but none found, returning empty");
+            return Collections.emptyList();
+        }
+        
+        // Fallback: find ANY usage of the target (original broad behavior)
+        // This is only used when no specific methods are provided (backward compatibility)
+        for (String instanceName : instanceNames) {
+            if (instanceName == null || instanceName.isBlank()) continue;
+            String callPattern = "\\b" + Pattern.quote(instanceName) + "\\s*\\.\\s*\\w+\\s*\\(";
+            Pattern cp = Pattern.compile(callPattern);
+            Matcher cm = cp.matcher(content);
+            while (cm.find()) {
+                int callPos = cm.start();
+                String enclosing = findEnclosingMethod(methodsInFile, callPos);
+                debug("[DEBUG] getMethodsUsingTarget: " + instanceName + "." + content.substring(cm.start(), Math.min(cm.end() + 20, content.length())) + " in method " + enclosing);
+                if (enclosing != null) callers.add(enclosing);
+            }
+            String refPattern = "\\b" + Pattern.quote(instanceName) + "\\s*::\\s*\\w+";
+            Pattern rp = Pattern.compile(refPattern);
+            Matcher rm = rp.matcher(content);
             while (rm.find()) {
-                String enclosing = findEnclosingMethod(spans, rm.start());
+                int callPos = rm.start();
+                String enclosing = findEnclosingMethod(methodsInFile, callPos);
                 if (enclosing != null) callers.add(enclosing);
             }
         }
-        debug("[DEBUG] getMethodsUsingTarget: target=" + targetSimpleName
-                + " instances=" + instanceNames + " callers=" + callers);
+        debug("[DEBUG] getMethodsUsingTarget: target=" + targetSimpleName + " instances=" + instanceNames + " callers=" + callers);
         return new ArrayList<>(callers);
     }
+    
+    // Backward compatibility wrapper
+    private static List<String> getMethodsUsingTarget(String content, String targetSimpleName, String targetFqn, List<String> supertypeSimpleNames) {
+        return getMethodsUsingTarget(content, targetSimpleName, targetFqn, supertypeSimpleNames, null);
+    }
 
-    private static Set<String> extractInstanceNames(String content, String targetSimpleName, String targetFqn,
-                                                     List<String> supertypeSimpleNames) {
-        Set<String> instanceNames = new HashSet<>();
+    /**
+     * Extracts all possible instance names (field/variable/parameter names) that could
+     * reference the target class or one of its supertypes.
+     */
+    private static Set<String> extractInstanceNames(String content, String targetSimpleName, String targetFqn, List<String> supertypeSimpleNames) {
+        Set<String> instanceNames = new LinkedHashSet<>();
         Set<String> typeTokens = new LinkedHashSet<>();
         if (targetSimpleName != null && !targetSimpleName.isBlank()) typeTokens.add(targetSimpleName);
         if (targetFqn != null && !targetFqn.isBlank()) typeTokens.add(targetFqn);
@@ -1075,7 +1128,9 @@ public class ImpactAnalyzer {
         if (Pattern.compile("\\b" + Pattern.quote(t) + "\\s*<").matcher(content).find()) return true; // generics
         if (Pattern.compile("\\b" + Pattern.quote(t) + "\\b\\s+\\w+").matcher(content).find()) return true; // variable/param decl
 
-        return true;
+        // If the simple name appears but not in any type-ish context, it's likely just a method name
+        // or other identifier that happens to match, not an actual reference to the target class.
+        return false;
     }
 
     private static boolean isPlausibleQualifierIdentifier(String content, String qualifier, String targetSimpleName) {
