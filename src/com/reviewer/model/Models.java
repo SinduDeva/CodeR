@@ -15,7 +15,11 @@ public class Models {
         SPRING_BOOT("Spring Boot"),
         OPEN_API("OpenAPI / Swagger"),
         PERFORMANCE("Performance"),
-        CODE_QUALITY("Code Quality");
+        CODE_QUALITY("Code Quality"),
+        SOAP("SOAP / JAX-WS"),
+        GRPC("gRPC"),
+        OUTBOUND_CLIENT("Outbound Client"),
+        SCHEDULED("Scheduled / Async");
         
         public final String displayName;
         Category(String displayName) { this.displayName = displayName; }
@@ -65,6 +69,9 @@ public class Models {
     }
 
     public static class AnalysisContext {
+        private static final Pattern P_CLASS_ANNOTATION = Pattern.compile("@(\\w+)(?:\\(.*?\\))?\\s+(?:public|class|interface|enum)");
+        private static final Pattern P_ANNOTATION_NAME  = Pattern.compile("@(\\w+)");
+
         public String className;
         public Set<String> classAnnotations = new HashSet<>();
         public Map<Range, Set<String>> methodAnnotations = new HashMap<>();
@@ -72,10 +79,15 @@ public class Models {
         public boolean isService;
         public boolean isRepository;
         public boolean isEntity;
-        
+        public boolean isSoapEndpoint;
+        public boolean isGrpcClient;
+        public boolean isFeignClient;
+        public boolean isOutboundClient;
+        public boolean isScheduled;
+        public boolean isQuartzJob;
+
         public void analyze(String content, List<Range> methodRanges, String[] lines) {
-            Pattern classAnnotationPattern = Pattern.compile("@(\\w+)(?:\\(.*?\\))?\\s+(?:public|class|interface|enum)");
-            Matcher m = classAnnotationPattern.matcher(content);
+            Matcher m = P_CLASS_ANNOTATION.matcher(content);
             while (m.find()) {
                 classAnnotations.add(m.group(1));
             }
@@ -84,6 +96,17 @@ public class Models {
             isService = classAnnotations.contains("Service");
             isRepository = classAnnotations.contains("Repository");
             isEntity = classAnnotations.contains("Entity") || classAnnotations.contains("Table");
+            isSoapEndpoint = classAnnotations.contains("WebService") || content.contains("@WebMethod");
+            isFeignClient = classAnnotations.contains("FeignClient");
+            isGrpcClient = content.contains("AbstractStub") || content.contains("ManagedChannel")
+                           || content.contains("ManagedChannelBuilder") || content.contains("GrpcClient")
+                           || (content.contains("Stub") && content.contains("newBlockingStub"));
+            isOutboundClient = isFeignClient || isGrpcClient
+                               || content.contains("RestTemplate") || content.contains("WebClient")
+                               || content.contains("JAXBContext");
+            isScheduled = content.contains("@Scheduled");
+            isQuartzJob = content.contains("implements Job") || content.contains("JobDetail")
+                          || content.contains("JobBuilder") || content.contains("TriggerBuilder");
 
             for (Range r : methodRanges) {
                 Set<String> annos = new HashSet<>();
@@ -91,7 +114,7 @@ public class Models {
                 for (int i = Math.max(0, r.start - 3); i < r.start; i++) {
                     String line = lines[i].trim();
                     if (line.startsWith("@")) {
-                        Matcher am = Pattern.compile("@(\\w+)").matcher(line);
+                        Matcher am = P_ANNOTATION_NAME.matcher(line);
                         while (am.find()) annos.add(am.group(1));
                     }
                 }
@@ -161,11 +184,25 @@ public class Models {
         public boolean expandChangedScopeToMethod = false;
         public boolean strictJava = false;
         public boolean strictSpring = false;
-        public boolean showGoodPatterns = true;
         public boolean showTestingScope = false;
         public boolean openReport = false;
         public boolean debug = false;
+        public boolean enableImpactAnalysis = true;
         public boolean enableTransitiveApiDiscovery = true;
+        // Rule category toggles
+        public boolean enableRulesBugPatterns    = true;
+        public boolean enableRulesNullSafety     = true;
+        public boolean enableRulesExceptions     = true;
+        public boolean enableRulesLogging        = true;
+        public boolean enableRulesSpringBoot     = true;
+        public boolean enableRulesSecurity       = true;
+        public boolean enableRulesOpenApi        = true;
+        public boolean enableRulesPerformance    = true;
+        public boolean enableRulesCodeQuality    = true;
+        public boolean enableRulesSoap           = true;
+        public boolean enableRulesGrpc           = true;
+        public boolean enableRulesOutboundClient = true;
+        public boolean enableRulesScheduled      = true;
         public int transitiveApiDiscoveryMaxDepth = 6;
         public int transitiveApiDiscoveryMaxVisitedFiles = 30;
         public int transitiveApiDiscoveryMaxControllers = 5;
@@ -196,8 +233,20 @@ public class Models {
         public boolean useAstCallerDetection = true;
         public String pmdPath = "pmd";
         public String pmdRulesetPath = "config/pmd/changelens-ruleset.xml";
+        /**
+         * Files for which PMD ran successfully and produced results.
+         * RuleEngine skips overlapping rule categories for these files to avoid duplicates.
+         * Populated by PmdAnalyzer; never set manually.
+         */
+        public final Set<String> pmdCoveredFiles = new HashSet<>();
         // Target Java source version; used to gate version-specific rules (e.g. pattern matching >= 16)
         public int javaSourceVersion = 17;
+        /**
+         * Spring Boot major version of the project.
+         * Used to gate version-specific rules (e.g. javax.* → jakarta.* migration for Spring Boot 3+).
+         * Set via property: spring.boot.version=3
+         */
+        public int springBootVersion = 3;
         /**
          * Controls what the "Dependency Mapping" graph in the HTML report displays.
          * {@code true}  (default) — method-scoped: only files that call a changed method.
@@ -231,5 +280,12 @@ public class Models {
          * Change if your code-generator uses a different suffix.
          */
         public String openApiDelegateSuffix = "ApiDelegate";
+        /**
+         * Primary language of the project. Controls which staged files are picked up
+         * and which analysis rules are executed.
+         * Supported values: java (default), python
+         * Set via property: primary.language=python
+         */
+        public String primaryLanguage = "java";
     }
 }

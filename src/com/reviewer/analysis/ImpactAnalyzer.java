@@ -1,11 +1,52 @@
 package com.reviewer.analysis;
 
 import com.reviewer.model.Models.*;
+import java.util.Arrays;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.*;
 import java.util.*;
 import java.util.stream.Collectors;
 
 public class ImpactAnalyzer {
+    /** Cache for compiled call/ref patterns keyed by "instance\u0000method" or "method\u0000suffix" for static/fallback patterns. */
+    private static final Map<String, Pattern> CALL_PATTERN_CACHE = new ConcurrentHashMap<>();
+
+    private static Pattern callPattern(String instanceName, String methodName) {
+        String key = instanceName + "\u0000" + methodName + "\u0000call";
+        return CALL_PATTERN_CACHE.computeIfAbsent(key, k ->
+            Pattern.compile("\\b" + Pattern.quote(instanceName) + "\\s*\\.\\s*" + Pattern.quote(methodName) + "\\b\\s*\\("));
+    }
+
+    private static Pattern refPattern(String instanceName, String methodName) {
+        String key = instanceName + "\u0000" + methodName + "\u0000ref";
+        return CALL_PATTERN_CACHE.computeIfAbsent(key, k ->
+            Pattern.compile("\\b" + Pattern.quote(instanceName) + "\\s*::\\s*" + Pattern.quote(methodName) + "\\b"));
+    }
+
+    private static Pattern unqualifiedCallPattern(String methodName) {
+        String key = methodName + "\u0000unqcall";
+        return CALL_PATTERN_CACHE.computeIfAbsent(key, k ->
+            Pattern.compile("(?<![.\\w])" + Pattern.quote(methodName) + "\\s*\\("));
+    }
+
+    private static Pattern unqualifiedRefPattern(String methodName) {
+        String key = methodName + "\u0000unqref";
+        return CALL_PATTERN_CACHE.computeIfAbsent(key, k ->
+            Pattern.compile("(?<![.\\w])::\\s*" + Pattern.quote(methodName) + "\\b"));
+    }
+
+    private static Pattern anyCallPattern(String methodName) {
+        String key = methodName + "\u0000anycall";
+        return CALL_PATTERN_CACHE.computeIfAbsent(key, k ->
+            Pattern.compile("\\b\\w+\\s*\\.\\s*" + Pattern.quote(methodName) + "\\b\\s*\\("));
+    }
+
+    private static Pattern anyRefPattern(String methodName) {
+        String key = methodName + "\u0000anyref";
+        return CALL_PATTERN_CACHE.computeIfAbsent(key, k ->
+            Pattern.compile("\\b\\w+\\s*::\\s*" + Pattern.quote(methodName) + "\\b"));
+    }
+
     private static volatile boolean debugEnabled = false;
     /**
      * Controls whether the structural fallback (step 6 / AST scan) is active.
@@ -322,191 +363,92 @@ public class ImpactAnalyzer {
             }
         }
 
-        // 4. Qualified calls: instanceName.method(...)
+        // 4. Caller detection: regex (qualified calls + method refs) merged with AST when available.
+        // Regex handles static imports and method references (obj::method) that AST misses.
+        // AST handles chained calls, lambdas, and anonymous classes that regex misattributes.
+        // Both run in parallel on the pre-computed instanceNames; results are merged.
         if (instanceNames != null && !instanceNames.isEmpty()) {
-            debug("[DEBUG] getMethodsCalling: checking qualified calls with instanceNames=" + instanceNames + ", touchedMethods=" + touchedMethods + ", allowBroadFallback=" + allowBroadFallback);
+            debug("[DEBUG] step 4 regex: instanceNames=" + instanceNames + ", touchedMethods=" + touchedMethods);
             for (String instanceName : instanceNames) {
                 if (instanceName == null || instanceName.isBlank()) continue;
                 for (String method : touchedMethods) {
                     String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
-                    if (!isValidMethodName(pureMethodName)) {
-                        continue;
-                    }
-                    String callPattern = "\\b" + Pattern.quote(instanceName) + "\\s*\\.\\s*" + Pattern.quote(pureMethodName) + "\\b\\s*\\(";
-                    Pattern cp = Pattern.compile(callPattern);
-                    Matcher cm = cp.matcher(content);
-                    int matchCount = 0;
+                    if (!isValidMethodName(pureMethodName)) continue;
+                    // Qualified dot-call: instance.method(
+                    Matcher cm = callPattern(instanceName, pureMethodName).matcher(content);
                     while (cm.find()) {
-                        matchCount++;
-                        int callPos = cm.start();
-                        String enclosing = findEnclosingMethod(methodsInFile, callPos);
-                        debug("[DEBUG] getMethodsCalling: match at position " + callPos + ", enclosing method: " + (enclosing == null ? "NULL" : enclosing));
+                        String enclosing = findEnclosingMethod(methodsInFile, cm.start());
+                        debug("[DEBUG] step 4 regex: " + instanceName + "." + pureMethodName + "() enclosed by " + enclosing);
                         if (enclosing != null) callers.add(enclosing);
                     }
-                    debug("[DEBUG] getMethodsCalling: pattern '" + callPattern + "' found " + matchCount + " matches");
-
-                    // Method reference: instanceName::method (streams/optionals)
-                    String refPattern = "\\b" + Pattern.quote(instanceName) + "\\s*::\\s*" + Pattern.quote(pureMethodName) + "\\b";
-                    Pattern rp = Pattern.compile(refPattern);
-                    Matcher rm = rp.matcher(content);
+                    // Method reference: instance::method
+                    Matcher rm = refPattern(instanceName, pureMethodName).matcher(content);
                     while (rm.find()) {
-                        int callPos = rm.start();
-                        String enclosing = findEnclosingMethod(methodsInFile, callPos);
+                        String enclosing = findEnclosingMethod(methodsInFile, rm.start());
                         if (enclosing != null) callers.add(enclosing);
                     }
                 }
             }
-        }
-
-        // 4a. Broad fallback: anyQualifier.method(...)
-        // This is intentionally looser than 4b. It helps when instance name extraction fails
-        // (e.g., injection patterns, interface/supertype fields) but the method token exists.
-        // Only run this if we have evidence the target is actually used in this file.
-        if (allowBroadFallback && callers.isEmpty()) {
-            boolean likelyRef = isLikelyTargetReferencedInFile(content, targetSimpleName, targetFqn);
-            if (likelyRef) {
-                debug("[DEBUG] step 4a: running broad fallback (target likely referenced) for target=" + targetSimpleName);
+            // Static import unqualified calls:
+            // Covers static utility classes called via `import static Foo.*` or `import static Foo.method`.
+            if (staticImportAll || !staticallyImportedMethods.isEmpty()) {
                 for (String method : touchedMethods) {
                     String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
-                    if (!isValidMethodName(pureMethodName)) {
-                        continue;
+                    if (!isValidMethodName(pureMethodName)) continue;
+                    if (!staticImportAll && !staticallyImportedMethods.contains(pureMethodName)) continue;
+                    // Match unqualified call: methodName( not preceded by a dot (to avoid double-counting qualified calls)
+                    Matcher um = unqualifiedCallPattern(pureMethodName).matcher(content);
+                    while (um.find()) {
+                        String enclosing = findEnclosingMethod(methodsInFile, um.start());
+                        debug("[DEBUG] step 4 static-import: " + pureMethodName + "() enclosed by " + enclosing);
+                        if (enclosing != null && !enclosing.equals(pureMethodName)) callers.add(enclosing);
                     }
-                    String anyQualifierCallPattern = "\\b\\w+\\s*\\.\\s*" + Pattern.quote(pureMethodName) + "\\b\\s*\\(";
-                    Matcher aqm = Pattern.compile(anyQualifierCallPattern).matcher(content);
-                    while (aqm.find()) {
-                        int callPos = aqm.start();
-                        String enclosing = findEnclosingMethod(methodsInFile, callPos);
-                        if (enclosing != null) callers.add(enclosing);
-                    }
-
-                    String anyQualifierRefPattern = "\\b\\w+\\s*::\\s*" + Pattern.quote(pureMethodName) + "\\b";
-                    Matcher arm = Pattern.compile(anyQualifierRefPattern).matcher(content);
-                    while (arm.find()) {
-                        int callPos = arm.start();
-                        String enclosing = findEnclosingMethod(methodsInFile, callPos);
-                        if (enclosing != null) callers.add(enclosing);
+                    // Method reference: ::methodName
+                    Matcher ur = unqualifiedRefPattern(pureMethodName).matcher(content);
+                    while (ur.find()) {
+                        String enclosing = findEnclosingMethod(methodsInFile, ur.start());
+                        if (enclosing != null && !enclosing.equals(pureMethodName)) callers.add(enclosing);
                     }
                 }
-            } else {
-                debug("[DEBUG] step 4a: skipping broad fallback (target not referenced) for target=" + targetSimpleName);
+                debug("[DEBUG] step 4 static-import: callers so far=" + callers.size());
             }
-        }
+            debug("[DEBUG] step 4 regex: found " + callers.size() + " callers");
 
-        // 4b. Fallback qualified calls: *.method(...)
-        // This helps when the target is referenced via an interface/supertype (instance name extraction may fail),
-        // or when the call appears inside lambdas/streams but still uses dot-call syntax.
-        // Only run when likelyRef=true to avoid false positives from methods with the same name in different classes.
-        // This is a form of structural fallback, so respect the structural fallback configuration.
-        boolean likelyRef = isLikelyTargetReferencedInFile(content, targetSimpleName, targetFqn);
-        if (callers.isEmpty() && likelyRef && structuralFallbackEnabled) {
-            debug("[DEBUG] step 4b: running (likelyRef=" + likelyRef + ") for target=" + targetSimpleName);
-            for (String method : touchedMethods) {
-                String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
-                if (!isValidMethodName(pureMethodName)) {
-                    continue;
-                }
-                String anyQualifierCallPattern = "\\b(\\w+)\\s*\\.\\s*" + Pattern.quote(pureMethodName) + "\\b\\s*\\(";
-                Matcher aqm = Pattern.compile(anyQualifierCallPattern).matcher(content);
-                int matchCount = 0;
-                while (aqm.find()) {
-                    matchCount++;
-                    String qualifier = aqm.group(1);
-                    if (!isPlausibleQualifierIdentifier(content, qualifier, targetSimpleName)) {
-                        debug("[DEBUG] step 4b: skipping qualifier '" + qualifier + "' (not plausible)");
-                        continue;
-                    }
-                    int callPos = aqm.start();
-                    String enclosing = findEnclosingMethod(methodsInFile, callPos);
-                    debug("[DEBUG] step 4b: found " + qualifier + "." + pureMethodName + " at position " + callPos + ", enclosing method: " + enclosing);
-                    if (enclosing != null) callers.add(enclosing);
-                }
-                if (matchCount > 0) {
-                    debug("[DEBUG] step 4b: pattern '" + anyQualifierCallPattern + "' found " + matchCount + " matches for method " + pureMethodName);
-                }
-
-                String anyQualifierRefPattern = "\\b(\\w+)\\s*::\\s*" + Pattern.quote(pureMethodName) + "\\b";
-                Matcher arm = Pattern.compile(anyQualifierRefPattern).matcher(content);
-                while (arm.find()) {
-                    String qualifier = arm.group(1);
-                    if (!isPlausibleQualifierIdentifier(content, qualifier, targetSimpleName)) {
-                        continue;
-                    }
-                    int callPos = arm.start();
-                    String enclosing = findEnclosingMethod(methodsInFile, callPos);
-                    if (enclosing != null) callers.add(enclosing);
-                }
-            }
-            debug("[DEBUG] step 4b: found " + callers.size() + " callers for target " + targetSimpleName);
-        }
-
-        // 4c. Raw-token fallback: handles chained calls (factory.get().method(...)), lambdas, and
-        // any other case where steps 1-4b failed to attribute a known touched-method call.
-        // Only runs when we KNOW the method token is present in the file but all qualifier-based
-        // steps came up empty.  findEnclosingMethod returns null for method *declarations*, so
-        // we don't accidentally treat the declaring class as a caller of itself.
-        // This is a form of structural fallback, so respect the structural fallback configuration.
-        if (callers.isEmpty() && hasAnyTouchedToken && structuralFallbackEnabled) {
-            debug("[DEBUG] step 4c: raw-token fallback for target=" + targetSimpleName);
-            for (String method : touchedMethods) {
-                String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
-                if (!isValidMethodName(pureMethodName)) continue;
-                Pattern rawCall = Pattern.compile("(?<![\\w\\$])" + Pattern.quote(pureMethodName) + "\\s*\\(");
-                Matcher rm = rawCall.matcher(content);
-                while (rm.find()) {
-                    int callPos = rm.start();
-                    String enclosing = findEnclosingMethod(methodsInFile, callPos);
-                    // Skip if the enclosing method IS the touched method itself
-                    // (would mean we're looking at its own declaration/recursive call context)
-                    if (enclosing != null && !enclosing.equals(pureMethodName)) {
-                        debug("[DEBUG] step 4c: raw occurrence of '" + pureMethodName + "' at " + callPos + " enclosed by " + enclosing);
-                        callers.add(enclosing);
-                    }
-                }
-            }
-            debug("[DEBUG] step 4c: found " + callers.size() + " callers");
-        }
-
-        // 6. Structural fallback — only runs when explicitly enabled via config flag
-        // (transitive.caller.structural.fallback=true).  Off by default because it
-        // emits edges for ANY call on the target type, not just the touched methods,
-        // which can pull unrelated execution paths into the BFS and surface false-
-        // positive endpoints.
-        //
-        // When enabled, the AST-based scanner (AstInvocationFinder) is preferred:
-        // it never matches inside strings/comments, handles chains/lambdas precisely,
-        // and attributes lambda-body calls to the correct enclosing named method.
-        // The regex scan is used only if the AST library is not on the classpath.
-        if (callers.isEmpty() && structuralFallbackEnabled && !instanceNames.isEmpty()) {
-            debug("[DEBUG] step 6: structural fallback enabled, running for target=" + targetSimpleName);
+            // AST parallel path: precise handling of chained calls, lambdas, anonymous classes.
+            // Uses the same instanceNames already computed above — no duplicate extraction.
+            // Runs unconditionally when JavaParser is available (no separate flag needed —
+            // it only adds results, never removes what regex already found).
             if (astCallerDetectionEnabled && AstInvocationFinder.isAvailable()) {
-                // AST path: precise, no string/comment false-positives
                 List<String> astCallers = AstInvocationFinder.findCallerMethods(
-                        content, targetSimpleName, targetFqn,
-                        supertypeSimpleNames != null ? supertypeSimpleNames : Collections.emptyList(),
-                        touchedMethods);
+                        content, instanceNames, touchedMethods);
+                int before = callers.size();
                 callers.addAll(astCallers);
-                debug("[DEBUG] step 6 AST: found " + astCallers.size() + " callers: " + astCallers);
-            } else {
-                // Regex fallback when JavaParser is unavailable
-                for (String inst : instanceNames) {
-                    if (inst == null || inst.isBlank()) continue;
-                    Pattern dotCall = Pattern.compile("\\b" + Pattern.quote(inst) + "\\s*\\.\\s*(\\w+)\\s*\\(");
-                    Matcher dc = dotCall.matcher(content);
-                    while (dc.find()) {
-                        String enclosing = findEnclosingMethod(methodsInFile, dc.start());
-                        if (enclosing != null) {
-                            debug("[DEBUG] step 6 regex: " + inst + "." + dc.group(1) + "() in " + enclosing);
-                            callers.add(enclosing);
-                        }
+                debug("[DEBUG] step 4 AST: added " + (callers.size() - before) + " new callers: " + astCallers);
+            }
+        }
+
+        // 4a. Broad fallback — only when both regex and AST came up empty and the caller
+        // explicitly allows looser matching (allowBroadFallback=true, confirmedDependent=false).
+        // Matches any qualifier: anyVar.method(...) — higher false-positive risk.
+        if (callers.isEmpty() && allowBroadFallback) {
+            boolean likelyRef = isLikelyTargetReferencedInFile(content, targetSimpleName, targetFqn);
+            if (likelyRef) {
+                debug("[DEBUG] step 4a: broad fallback for target=" + targetSimpleName);
+                for (String method : touchedMethods) {
+                    String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
+                    if (!isValidMethodName(pureMethodName)) continue;
+                    Matcher aqm = anyCallPattern(pureMethodName).matcher(content);
+                    while (aqm.find()) {
+                        String enclosing = findEnclosingMethod(methodsInFile, aqm.start());
+                        if (enclosing != null) callers.add(enclosing);
                     }
-                    Pattern ref = Pattern.compile("\\b" + Pattern.quote(inst) + "\\s*::\\s*(\\w+)\\b");
-                    Matcher rm2 = ref.matcher(content);
-                    while (rm2.find()) {
-                        String enclosing = findEnclosingMethod(methodsInFile, rm2.start());
+                    Matcher arm = anyRefPattern(pureMethodName).matcher(content);
+                    while (arm.find()) {
+                        String enclosing = findEnclosingMethod(methodsInFile, arm.start());
                         if (enclosing != null) callers.add(enclosing);
                     }
                 }
-                debug("[DEBUG] step 6 regex: found " + callers.size() + " callers");
+                debug("[DEBUG] step 4a: found " + callers.size() + " callers");
             }
         }
 
@@ -530,9 +472,22 @@ public class ImpactAnalyzer {
             return null;
         }
         debug("[DEBUG] findEnclosingMethod: checking position " + pos + " against " + spans.size() + " method spans");
-        for (MethodSpan s : spans) {
+        // Binary search: find the last span whose start <= pos, then verify pos < endExclusive.
+        // Spans are in source order (sorted ascending by start), so this is valid.
+        int lo = 0, hi = spans.size() - 1, candidate = -1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            if (spans.get(mid).start <= pos) {
+                candidate = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        if (candidate >= 0) {
+            MethodSpan s = spans.get(candidate);
             debug("[DEBUG] findEnclosingMethod: span " + s.name + " [" + s.start + ", " + s.endExclusive + ")");
-            if (pos >= s.start && pos < s.endExclusive) {
+            if (pos < s.endExclusive) {
                 debug("[DEBUG] findEnclosingMethod: position " + pos + " is inside " + s.name);
                 return s.name;
             }
@@ -656,6 +611,12 @@ public class ImpactAnalyzer {
      * Parses {@code content} to find every method declaration's span [headerStart, bodyEnd).
      * Used by both token-based and structural call-site finders to locate enclosing methods.
      */
+    private static final Set<String> JAVA_KEYWORDS = new HashSet<>(Arrays.asList(
+        "if", "else", "for", "while", "do", "switch", "case", "try", "catch",
+        "finally", "synchronized", "return", "throw", "new", "instanceof",
+        "assert", "break", "continue", "yield"
+    ));
+
     static List<MethodSpan> buildMethodSpans(String content) {
         List<MethodSpan> spans = new ArrayList<>();
         if (content == null || content.isBlank()) return spans;
@@ -664,6 +625,7 @@ public class ImpactAnalyzer {
         Matcher mm = methodDeclPattern.matcher(content);
         while (mm.find()) {
             String name = mm.group(1);
+            if (JAVA_KEYWORDS.contains(name)) continue;
             int paramStart = mm.end() - 1;
             // Skip past parameter list
             int depth = 1;
@@ -715,31 +677,61 @@ public class ImpactAnalyzer {
         
         // If touchedMethods are provided, try to match them specifically first
         if (touchedMethods != null && !touchedMethods.isEmpty()) {
+            // Check for static import in this file — covers static utility classes
+            boolean hasStaticImportAll = false;
+            Set<String> hasStaticImportMethods = new HashSet<>();
+            if (targetFqn != null && !targetFqn.isBlank()) {
+                Pattern siPat = Pattern.compile("(?m)^\\s*import\\s+static\\s+([\\w\\.\\*]+)\\s*;\\s*$");
+                Matcher sim = siPat.matcher(content);
+                while (sim.find()) {
+                    String imp = sim.group(1);
+                    if (imp == null) continue;
+                    if (imp.equals(targetFqn + ".*")) hasStaticImportAll = true;
+                    else if (imp.startsWith(targetFqn + ".")) {
+                        String m = imp.substring((targetFqn + ".").length());
+                        if (isValidMethodName(m)) hasStaticImportMethods.add(m);
+                    }
+                }
+            }
+
             for (String instanceName : instanceNames) {
                 if (instanceName == null || instanceName.isBlank()) continue;
                 for (String method : touchedMethods) {
                     String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
                     if (!isValidMethodName(pureMethodName)) continue;
                     
-                    // Look for specific method calls
+                    // Qualified dot-call: instance.method( or ClassName.method(
                     String specificCallPattern = "\\b" + Pattern.quote(instanceName) + "\\s*\\.\\s*" + Pattern.quote(pureMethodName) + "\\b\\s*\\(";
-                    Pattern scp = Pattern.compile(specificCallPattern);
-                    Matcher scm = scp.matcher(content);
+                    Matcher scm = Pattern.compile(specificCallPattern).matcher(content);
                     while (scm.find()) {
-                        int callPos = scm.start();
-                        String enclosing = findEnclosingMethod(methodsInFile, callPos);
+                        String enclosing = findEnclosingMethod(methodsInFile, scm.start());
                         debug("[DEBUG] getMethodsUsingTarget: " + instanceName + "." + pureMethodName + "() in method " + enclosing);
                         if (enclosing != null) callers.add(enclosing);
                     }
                     
-                    // Look for method references
+                    // Method reference: instance::method
                     String specificRefPattern = "\\b" + Pattern.quote(instanceName) + "\\s*::\\s*" + Pattern.quote(pureMethodName) + "\\b";
-                    Pattern srp = Pattern.compile(specificRefPattern);
-                    Matcher srm = srp.matcher(content);
+                    Matcher srm = Pattern.compile(specificRefPattern).matcher(content);
                     while (srm.find()) {
-                        int callPos = srm.start();
-                        String enclosing = findEnclosingMethod(methodsInFile, callPos);
+                        String enclosing = findEnclosingMethod(methodsInFile, srm.start());
                         if (enclosing != null) callers.add(enclosing);
+                    }
+                }
+            }
+
+            // Unqualified static-import calls: getTULNCCRScore(...) with no qualifier.
+            // Only runs when a static import of the target class is detected.
+            if (hasStaticImportAll || !hasStaticImportMethods.isEmpty()) {
+                for (String method : touchedMethods) {
+                    String pureMethodName = method == null ? "" : method.split("\\(")[0].trim();
+                    if (!isValidMethodName(pureMethodName)) continue;
+                    if (!hasStaticImportAll && !hasStaticImportMethods.contains(pureMethodName)) continue;
+                    Pattern unqualifiedCall = Pattern.compile("(?<![.\\w])" + Pattern.quote(pureMethodName) + "\\s*\\(");
+                    Matcher um = unqualifiedCall.matcher(content);
+                    while (um.find()) {
+                        String enclosing = findEnclosingMethod(methodsInFile, um.start());
+                        debug("[DEBUG] getMethodsUsingTarget static-import: " + pureMethodName + "() in method " + enclosing);
+                        if (enclosing != null && !enclosing.equals(pureMethodName)) callers.add(enclosing);
                     }
                 }
             }
@@ -793,7 +785,7 @@ public class ImpactAnalyzer {
      * Extracts all possible instance names (field/variable/parameter names) that could
      * reference the target class or one of its supertypes.
      */
-    private static Set<String> extractInstanceNames(String content, String targetSimpleName, String targetFqn, List<String> supertypeSimpleNames) {
+    static Set<String> extractInstanceNames(String content, String targetSimpleName, String targetFqn, List<String> supertypeSimpleNames) {
         Set<String> instanceNames = new LinkedHashSet<>();
         Set<String> typeTokens = new LinkedHashSet<>();
         if (targetSimpleName != null && !targetSimpleName.isBlank()) typeTokens.add(targetSimpleName);
@@ -866,11 +858,32 @@ public class ImpactAnalyzer {
 
         String classPrefix = "";
         Pattern classMapping = Pattern.compile("@(?:RequestMapping|PostMapping|GetMapping|PutMapping|DeleteMapping|PatchMapping)\\s*\\((?:(?:value|path)\\s*=\\s*)?\"([^\"]+)\"");
-        for (int classLineIdx = 0; classLineIdx < Math.min(lines.length, 50); classLineIdx++) {
+        Pattern mappingStart = Pattern.compile("@(?:RequestMapping|PostMapping|GetMapping|PutMapping|DeleteMapping|PatchMapping)\\b");
+        Pattern pathPattern0 = Pattern.compile("(?:value|path)\\s*=\\s*\"([^\"]+)\"|\"([^\"]+)\"");
+        for (int classLineIdx = 0; classLineIdx < Math.min(lines.length, 80); classLineIdx++) {
+            // Fast path: single-line @RequestMapping("/prefix")
             Matcher cm = classMapping.matcher(lines[classLineIdx]);
             if (cm.find()) {
                 classPrefix = cm.group(1);
                 break;
+            }
+            // Multi-line class-level mapping: buffer continuation lines until ')' or class/brace
+            if (mappingStart.matcher(lines[classLineIdx]).find()) {
+                StringBuilder annoBuf = new StringBuilder(lines[classLineIdx]).append(' ');
+                int j = classLineIdx + 1;
+                while (j < Math.min(lines.length, classLineIdx + 30)
+                        && !lines[j].contains(")")
+                        && !lines[j].contains("class ")
+                        && !lines[j].contains("{")) {
+                    annoBuf.append(lines[j]).append(' ');
+                    j++;
+                }
+                if (j < lines.length) annoBuf.append(lines[j]).append(' ');
+                Matcher pm = pathPattern0.matcher(annoBuf.toString());
+                if (pm.find()) {
+                    classPrefix = pm.group(1) != null ? pm.group(1) : pm.group(2);
+                    break;
+                }
             }
             if (lines[classLineIdx].contains("class " + className)) break;
         }
@@ -1182,4 +1195,107 @@ public class ImpactAnalyzer {
         char first = trimmed.charAt(0);
         return Character.isJavaIdentifierStart(first);
     }
+
+    /**
+     * Extracts SOAP operation names from a JAX-WS endpoint class that are exposed by the
+     * given touched methods. Returns strings in the form "SOAP: operationName".
+     * Falls back to the @WebMethod operationName attribute if set, otherwise uses the Java method name.
+     */
+    public static List<String> extractSoapOperations(String content, List<String> touchedMethods) {
+        List<String> ops = new ArrayList<>();
+        if (touchedMethods == null || touchedMethods.isEmpty()) return ops;
+        String[] lines = content.split("\\R");
+        Pattern webMethod = Pattern.compile("@WebMethod\\s*(?:\\(([^)]*)\\))?");
+        for (String rawMethod : touchedMethods) {
+            String methodName = rawMethod.split("\\(")[0].trim();
+            if (!isValidMethodName(methodName)) continue;
+            // Find the method declaration line
+            Pattern decl = Pattern.compile("(?:public|protected)\\s+\\S+\\s+" + Pattern.quote(methodName) + "\\s*\\(");
+            Matcher dm = decl.matcher(content);
+            if (!dm.find()) continue;
+            int methodLine = getLineNumber(content, dm.start());
+            // Scan up to 5 lines above for @WebMethod
+            String operationName = methodName;
+            for (int i = Math.max(0, methodLine - 6); i < methodLine - 1; i++) {
+                Matcher wm = webMethod.matcher(lines[i]);
+                if (wm.find()) {
+                    String attrs = wm.group(1);
+                    if (attrs != null) {
+                        Matcher nameAttr = Pattern.compile("operationName\\s*=\\s*\"([^\"]+)\"").matcher(attrs);
+                        if (nameAttr.find()) operationName = nameAttr.group(1);
+                    }
+                    break;
+                }
+            }
+            ops.add("SOAP: " + operationName);
+        }
+        return ops;
+    }
+
+    /**
+     * Extracts Feign client operations from a @FeignClient interface that are called by the
+     * given touched methods. Returns strings in the form "HTTP_METHOD /path (FeignClient: InterfaceName)".
+     */
+    public static List<String> extractFeignOperations(String content, List<String> touchedMethods) {
+        List<String> ops = new ArrayList<>();
+        if (touchedMethods == null || touchedMethods.isEmpty()) return ops;
+        // Extract the Feign client name
+        Matcher nameMatcher = Pattern.compile("@FeignClient\\s*\\([^)]*name\\s*=\\s*\"([^\"]+)\"").matcher(content);
+        String clientName = nameMatcher.find() ? nameMatcher.group(1) : "unknown";
+
+        Pattern mappingAnno = Pattern.compile("@(Get|Post|Put|Delete|Patch|Request)Mapping\\b[^\\n]*");
+        Pattern pathPat = Pattern.compile("(?:value|path)\\s*=\\s*\"([^\"]+)\"|\"([^\"]+)\"");
+
+        for (String rawMethod : touchedMethods) {
+            String methodName = rawMethod.split("\\(")[0].trim();
+            if (!isValidMethodName(methodName)) continue;
+            Pattern decl = Pattern.compile("(?:public|default|\\s)\\s*\\S+\\s+" + Pattern.quote(methodName) + "\\s*\\(");
+            Matcher dm = decl.matcher(content);
+            if (!dm.find()) continue;
+            int methodLine = getLineNumber(content, dm.start());
+            String[] lines = content.split("\\R");
+            for (int i = Math.max(0, methodLine - 5); i < methodLine - 1; i++) {
+                Matcher mm = mappingAnno.matcher(lines[i]);
+                if (!mm.find()) continue;
+                String verb = mm.group(1).equals("Request") ? "HTTP" : mm.group(1).toUpperCase();
+                Matcher pm = pathPat.matcher(mm.group(0));
+                String path = pm.find() ? (pm.group(1) != null ? pm.group(1) : pm.group(2)) : methodName;
+                ops.add(verb + " " + path + " (Feign: " + clientName + ")");
+                break;
+            }
+        }
+        return ops;
+    }
+
+    /**
+     * Extracts gRPC RPC call names from a gRPC client class for the given touched methods.
+     * Returns strings in the form "gRPC: rpcMethodName".
+     */
+    public static List<String> extractGrpcOperations(String content, List<String> touchedMethods) {
+        List<String> ops = new ArrayList<>();
+        if (touchedMethods == null || touchedMethods.isEmpty()) return ops;
+        // Detect stub calls: stubVar.someRpcMethod(request)
+        Pattern stubCall = Pattern.compile("\\b(\\w+)\\.(\\w+)\\s*\\(\\s*\\w*Request");
+        for (String rawMethod : touchedMethods) {
+            String methodName = rawMethod.split("\\(")[0].trim();
+            if (!isValidMethodName(methodName)) continue;
+            // Find the method body
+            Pattern decl = Pattern.compile("(?:public|protected|private)\\s+\\S+\\s+" + Pattern.quote(methodName) + "\\s*\\(");
+            Matcher dm = decl.matcher(content);
+            if (!dm.find()) continue;
+            int bodyStart = content.indexOf('{', dm.end());
+            if (bodyStart == -1) continue;
+            // Scan up to 3000 chars of body for stub calls
+            String body = content.substring(bodyStart, Math.min(content.length(), bodyStart + 3000));
+            Matcher sc = stubCall.matcher(body);
+            while (sc.find()) {
+                String rpcName = sc.group(2);
+                // Filter out noise: newBlockingStub, build, etc.
+                if (rpcName.startsWith("new") || rpcName.equals("build") || rpcName.equals("get")) continue;
+                ops.add("gRPC: " + rpcName);
+            }
+        }
+        return ops;
+    }
+
 }

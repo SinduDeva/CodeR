@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -30,25 +31,32 @@ public class JavaSymbolIndex {
     private static final Pattern EXTENDS_CLAUSE  = Pattern.compile("\\bextends\\s+(.+?)(?=\\bimplements\\b|\\{)");
     private static final Pattern IMPLEMENTS_CLAUSE = Pattern.compile("\\bimplements\\s+(.+?)(?=\\{)");
     // Caches Pattern.compile("\\b<token>\\b") — built once per unique token per JVM session
-    private static final Map<String, Pattern> TOKEN_PATTERN_CACHE = new HashMap<>();
+    private static final Map<String, Pattern> TOKEN_PATTERN_CACHE = new ConcurrentHashMap<>();
+    private static final Pattern AUTOWIRED_PATTERN = Pattern.compile(
+        "@(?:Autowired|Inject)\\b[\\s\\n]*(?:(?:\\((?:[^)]*)\\)\\s*)?)*[\\s\\n]*" +
+        "([\\w\\.]+)(?:<[^>]*>)?\\s+\\w+\\b",
+        Pattern.MULTILINE
+    );
 
-    private final Map<String, ClassInfo> classesByPath = new HashMap<>();
-    private final Map<String, Set<ClassInfo>> classesBySimpleName = new HashMap<>();
+    private final Map<String, ClassInfo> classesByPath = new ConcurrentHashMap<>();
+    private final Map<String, Set<ClassInfo>> classesBySimpleName = new ConcurrentHashMap<>();
 
     private JavaSymbolIndex() {}
 
     public static JavaSymbolIndex build(Path repoRoot) throws IOException {
         JavaSymbolIndex index = new JavaSymbolIndex();
+        List<Path> eligible;
         try (Stream<Path> paths = Files.walk(repoRoot)) {
-            paths.filter(Files::isRegularFile)
-                 .filter(p -> p.toString().endsWith(".java"))
-                 .filter(JavaSymbolIndex::isEligibleSourceFile)
-                 .forEach(p -> {
-                     try {
-                         parseClassInfo(p).ifPresent(index::add);
-                     } catch (IOException ignored) {}
-                 });
+            eligible = paths.filter(Files::isRegularFile)
+                            .filter(p -> p.toString().endsWith(".java"))
+                            .filter(JavaSymbolIndex::isEligibleSourceFile)
+                            .collect(Collectors.toList());
         }
+        eligible.parallelStream().forEach(p -> {
+            try {
+                parseClassInfo(p).ifPresent(index::add);
+            } catch (IOException ignored) {}
+        });
         return index;
     }
 
@@ -63,7 +71,11 @@ public class JavaSymbolIndex {
 
     private void add(ClassInfo info) {
         classesByPath.put(normalize(info.path), info);
-        classesBySimpleName.computeIfAbsent(info.simpleName, k -> new HashSet<>()).add(info);
+        classesBySimpleName.compute(info.simpleName, (k, existing) -> {
+            Set<ClassInfo> set = (existing != null) ? existing : ConcurrentHashMap.newKeySet();
+            set.add(info);
+            return set;
+        });
     }
 
     public Optional<ClassInfo> getClassInfo(Path path) {
@@ -306,16 +318,7 @@ public class JavaSymbolIndex {
             return false;
         }
 
-        // Match @Autowired/@Inject with the following field/param declaration
-        // Captures the field/param type name. Handles multi-line declarations.
-        // Pattern: @Autowired/@Inject (optional whitespace/newlines) type(possibly qualified) fieldName
-        Pattern autowiredPattern = Pattern.compile(
-            "@(?:Autowired|Inject)\\b[\\s\\n]*(?:(?:\\((?:[^)]*)\\)\\s*)?)*[\\s\\n]*" +
-            "([\\w\\.]+)(?:<[^>]*>)?\\s+\\w+\\b",
-            Pattern.MULTILINE
-        );
-
-        Matcher matcher = autowiredPattern.matcher(content);
+        Matcher matcher = AUTOWIRED_PATTERN.matcher(content);
         while (matcher.find()) {
             String fieldType = matcher.group(1);
             // Extract simple name (last component after dots)

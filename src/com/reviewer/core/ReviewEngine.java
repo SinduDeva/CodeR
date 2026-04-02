@@ -3,23 +3,23 @@ package com.reviewer.core;
 import com.reviewer.analysis.ImpactAnalyzer;
 import com.reviewer.analysis.JavaSymbolIndex;
 import com.reviewer.analysis.OpenApiSpecParser;
-import com.reviewer.analysis.RuleEngine;
+import com.reviewer.language.Language;
+import com.reviewer.language.LanguageFactory;
 import com.reviewer.model.Models.*;
-import com.reviewer.util.ColorConsole;
 import com.reviewer.report.HtmlReportGenerator;
-import java.io.*;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
-import java.time.Duration;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
+import com.reviewer.util.ColorConsole;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.*;
-import java.util.stream.*;
-import java.util.regex.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class ReviewEngine {
     private static final String VERSION = "2.1.0";
@@ -314,22 +314,37 @@ public class ReviewEngine {
     }
 
     public List<ChangedFile> getStagedFiles() {
-        List<String> allStaged = runGit("git", "diff", "--cached", "--name-only");
+        List<String> allStaged = runGit("git", "diff", "--cached", "--name-only", "--diff-filter=ACMR");
         this.totalStagedFiles = allStaged.size();
         debug("All staged files (" + totalStagedFiles + "): " + allStaged);
 
-        List<String> javaFiles = allStaged.stream()
-            .filter(f -> f.endsWith(".java"))
+        Language lang = LanguageFactory.getLanguage(config.primaryLanguage);
+        List<String> extensions = lang.getSupportedExtensions();
+        debug("Primary language: " + lang.getName() + ", extensions: " + extensions);
+
+        // Also collect staged config files for security scanning
+        List<String> configFiles = allStaged.stream()
+            .filter(f -> f.endsWith(".properties") || f.endsWith(".yml") || f.endsWith(".yaml"))
             .collect(Collectors.toList());
-        debug("Java files found: " + javaFiles);
+        debug("Staged config files: " + configFiles);
+
+        List<String> relevantFiles = allStaged.stream()
+            .filter(f -> extensions.stream().anyMatch(f::endsWith))
+            .collect(Collectors.toList());
+        debug("Staged files for language '" + lang.getName() + "': " + relevantFiles);
 
         // One git process for all files instead of one per file
-        Map<String, Set<Integer>> changedLinesByFile = batchGetChangedLines(javaFiles);
+        Map<String, Set<Integer>> changedLinesByFile = batchGetChangedLines(relevantFiles);
 
-        return javaFiles.stream()
+        // Scan config files for security issues
+        for (String cf : configFiles) {
+            reviewConfigFile(cf);
+        }
+
+        return relevantFiles.stream()
             .map(f -> {
                 Set<Integer> lines = changedLinesByFile.getOrDefault(f, new HashSet<>());
-                if (config.expandChangedScopeToMethod) {
+                if (config.expandChangedScopeToMethod && "java".equals(config.primaryLanguage)) {
                     try {
                         lines = expandChangedLinesToMethodScope(f, lines);
                     } catch (IOException ignored) {}
@@ -339,12 +354,13 @@ public class ReviewEngine {
             .collect(Collectors.toList());
     }
 
-    /** Single git diff --staged -U0 call; parses per-file hunk headers for all Java files at once. */
-    private Map<String, Set<Integer>> batchGetChangedLines(List<String> javaFiles) {
+    /** Single git diff --staged -U0 call; parses per-file hunk headers for all relevant files at once. */
+    private Map<String, Set<Integer>> batchGetChangedLines(List<String> files) {
         Map<String, Set<Integer>> result = new LinkedHashMap<>();
-        for (String f : javaFiles) result.put(f, new HashSet<>());
+        for (String f : files) result.put(f, new HashSet<>());
 
-        List<String> diff = runGit("git", "diff", "--staged", "-U0");
+        // --diff-filter=ACMR: Added, Copied, Modified, Renamed — skip Deleted/binary files
+        List<String> diff = runGit("git", "diff", "--staged", "-U0", "--diff-filter=ACMR");
         String currentFile = null;
         for (String line : diff) {
             if (line.startsWith("+++ b/")) {
@@ -460,41 +476,6 @@ public class ReviewEngine {
         return -1;
     }
 
-    private Set<Integer> getChangedLines(String filePath) {
-        Set<Integer> lines = new HashSet<>();
-        // Get the staged diff with 0 context lines to make parsing easier
-        List<String> diff = runGit("git", "diff", "--staged", "-U0", "--", filePath);
-        for (String line : diff) {
-            if (line.startsWith("@@")) {
-                // Parse the hunk header: @@ -oldStart,oldCount +newStart,newCount @@
-                // We are interested in the +newStart,newCount part
-                int plusIndex = line.indexOf('+');
-                if (plusIndex != -1) {
-                    String hunkPart = line.substring(plusIndex + 1);
-                    int spaceIndex = hunkPart.indexOf(' ');
-                    if (spaceIndex != -1) {
-                        hunkPart = hunkPart.substring(0, spaceIndex);
-                    }
-                    
-                    String[] parts = hunkPart.split(",");
-                    int start = Integer.parseInt(parts[0]);
-                    int count = (parts.length > 1) ? Integer.parseInt(parts[1]) : 1;
-
-                    // If count is 0, it means only deletions occurred at this position.
-                    // Record 'start' so touched-method detection can still find the method.
-                    if (count == 0) {
-                        lines.add(start);
-                    } else {
-                        for (int i = 0; i < count; i++) {
-                            lines.add(start + i);
-                        }
-                    }
-                }
-            }
-        }
-        return lines;
-    }
-
     public String run(List<ChangedFile> allChangedFiles) throws IOException {
         debug("Received " + allChangedFiles.size() + " files for review.");
         List<ChangedFile> testFiles = allChangedFiles.stream()
@@ -515,34 +496,131 @@ public class ReviewEngine {
             return null;
         }
 
-        for (ChangedFile file : changedFiles) {
-            reviewFile(file);
-        }
-        // Integration of PMD as an optional enhancement with graceful fallback
-        if (config.enablePmdAnalysis) {
+        // Run PMD first so pmdCoveredFiles is populated before RuleEngine skips overlapping groups
+        if (config.enablePmdAnalysis && "java".equals(config.primaryLanguage)) {
             try {
                 debug("PMD Path: " + config.pmdPath);
                 debug("PMD Ruleset: " + config.pmdRulesetPath);
                 debug("Files to analyze: " + changedFiles.size());
                 List<Finding> pmdFindings = com.reviewer.analysis.PmdAnalyzer.analyze(changedFiles, config);
                 findings.addAll(pmdFindings);
-                debug("PMD findings: " + pmdFindings);
+                debug("PMD findings: " + pmdFindings.size() + ", covered files: " + config.pmdCoveredFiles);
             } catch (Exception e) {
                 System.err.println("PMD analysis failed, falling back to built-in rules: " + e.getMessage());
             }
         }
+        // RuleEngine runs after PMD — skips overlapping categories for pmdCoveredFiles
+        for (ChangedFile file : changedFiles) {
+            reviewFile(file);
+        }
 
         testingStatusByFile = generateTestingStatus(changedFiles, testFiles);
-        
-        ensureSymbolIndex();
-        loadOrBuildReverseGraph(changedFiles);
-        
-        debug("Tree-sitter available: " + com.reviewer.analysis.TreeSitterAnalyzer.isAvailable());
-        impactEntries = analyzeImpact(changedFiles);
-        enrichImpactEntriesWithTesting();
 
+        if ("java".equals(config.primaryLanguage) && config.enableImpactAnalysis) {
+            ensureSymbolIndex();
+            loadOrBuildReverseGraph(changedFiles);
+            impactEntries = analyzeImpact(changedFiles);
+            enrichImpactEntriesWithTesting();
+        }
+
+        deduplicateFindings();
         printReport(changedFiles);
         return generateHtmlReport(changedFiles);
+    }
+
+    /**
+     * Removes duplicate findings: same file + same line + same message.
+     * Keeps the highest severity when duplicates differ.
+     */
+    private void deduplicateFindings() {
+        Map<String, Finding> seen = new LinkedHashMap<>();
+        for (Finding f : findings) {
+            String key = f.file + ":" + f.line + ":" + f.message;
+            Finding existing = seen.get(key);
+            if (existing == null || f.severity.ordinal() < existing.severity.ordinal()) {
+                seen.put(key, f);
+            }
+        }
+        findings = new ArrayList<>(seen.values());
+    }
+
+    /**
+     * Scans a staged application.properties or application.yml file for common
+     * security and configuration issues.
+     */
+    private void reviewConfigFile(String filePath) {
+        try {
+            Path p = repoRoot.resolve(filePath).normalize();
+            if (!Files.exists(p)) p = Paths.get(filePath).toAbsolutePath().normalize();
+            if (!Files.exists(p)) return;
+            String content = Files.readString(p);
+            String[] lines = content.split("\\R");
+            // All lines in a newly staged config file are "changed"
+            Set<Integer> allLines = new HashSet<>();
+            for (int i = 1; i <= lines.length; i++) allLines.add(i);
+            ChangedFile cf = new ChangedFile(filePath, Paths.get(filePath).getFileName().toString(), allLines);
+
+            for (int i = 0; i < lines.length; i++) {
+                String line = lines[i].trim();
+                int lineNum = i + 1;
+                // Skip comments
+                if (line.startsWith("#") || line.startsWith("!") || line.startsWith("//")) continue;
+
+                // Actuator all endpoints exposed
+                if (line.contains("management.endpoints.web.exposure.include") && line.contains("*")) {
+                    findings.add(new Finding(Severity.MUST_FIX, Category.SPRING_BOOT, cf.name, lineNum, line,
+                        "All Spring Boot Actuator endpoints are exposed publicly.",
+                        "management.endpoints.web.exposure.include=* exposes /actuator/env, /actuator/heapdump, /actuator/shutdown and others. Restrict to only what monitoring needs.",
+                        "management.endpoints.web.exposure.include=health,info"));
+                }
+
+                // Hardcoded datasource password
+                if ((line.startsWith("spring.datasource.password") || line.contains("datasource.password")) &&
+                    line.contains("=") && !line.matches(".*=\\s*$") && !line.matches(".*=\\s*\\$\\{.*\\}.*")) {
+                    String val = line.contains("=") ? line.substring(line.indexOf('=') + 1).trim() : "";
+                    if (!val.isEmpty()) {
+                        findings.add(new Finding(Severity.MUST_FIX, Category.SPRING_BOOT, cf.name, lineNum, line,
+                            "I noticed a hardcoded datasource password in a config file.",
+                            "Storing database passwords in plain text in config files is a critical security risk. Use environment variable substitution or a secret manager (Vault, AWS Secrets Manager).",
+                            "spring.datasource.password=${DB_PASSWORD}"));
+                    }
+                }
+
+                // SSL disabled
+                if (line.matches(".*server\\.ssl\\.enabled\\s*=\\s*false.*")) {
+                    // Skip test profiles (file name contains 'test')
+                    if (!filePath.toLowerCase().contains("test")) {
+                        findings.add(new Finding(Severity.SHOULD_FIX, Category.SPRING_BOOT, cf.name, lineNum, line,
+                            "I noticed SSL is explicitly disabled in this config.",
+                            "server.ssl.enabled=false means the application serves traffic over plain HTTP. This should only appear in local-dev configs, never in a production or staging profile.",
+                            "server.ssl.enabled=true"));
+                    }
+                }
+
+                // Root logging at DEBUG/TRACE in non-test
+                if (line.matches(".*logging\\.level\\.root\\s*=\\s*(DEBUG|TRACE).*")) {
+                    if (!filePath.toLowerCase().contains("test")) {
+                        findings.add(new Finding(Severity.SHOULD_FIX, Category.LOGGING, cf.name, lineNum, line,
+                            "I noticed root logging is set to DEBUG/TRACE.",
+                            "Root-level DEBUG or TRACE logging generates enormous log volume in production, hurting performance and potentially leaking sensitive request/response data.",
+                            "logging.level.root=WARN"));
+                    }
+                }
+
+                // Hardcoded generic secret / API key patterns in any property
+                if (line.matches(".*(?i)(?:password|secret|api[._-]?key|token)\\s*=\\s*[^$\\s{][^\\s]+.*")) {
+                    if (!line.contains("${") && !line.matches(".*=\\s*$")) {
+                        String propName = line.contains("=") ? line.substring(0, line.indexOf('=')).trim() : line;
+                        findings.add(new Finding(Severity.MUST_FIX, Category.SPRING_BOOT, cf.name, lineNum, line,
+                            "I noticed what looks like a hardcoded secret in '" + propName + "'.",
+                            "Secrets committed to source control are visible to anyone with repo access and remain in git history even after deletion. Use environment variable placeholders or a secret manager.",
+                            propName + "=${" + propName.toUpperCase().replace('.', '_').replace('-', '_') + "}"));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            debug("Config file scan failed for " + filePath + ": " + e.getMessage());
+        }
     }
 
     private boolean isTestFile(ChangedFile file) {
@@ -568,7 +646,7 @@ public class ReviewEngine {
         }
         String content = readFileCached(fullPath);
         String[] lines = content.split("\\R");
-        RuleEngine.runRules(content, lines, file, findings, config);
+        LanguageFactory.getLanguage(config.primaryLanguage).analyzeFile(content, lines, file, findings, config);
     }
     private int findMatchingBrace(String content, int startIndex) {
         int depth = 0;
@@ -603,38 +681,38 @@ public class ReviewEngine {
                 String className = classInfo.simpleName;
                 debug("Analyzing impact for " + classInfo.fqn + " (" + f.path + ")");
                 
-                List<String> touchedMethods = null;
-                if (com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
-                    touchedMethods = com.reviewer.analysis.TreeSitterAnalyzer.extractTouchedMethods(f, content);
-                    debug("Tree-sitter touched methods: " + touchedMethods);
-                }
-
-                if (touchedMethods == null || touchedMethods.isEmpty()) {
-                    touchedMethods = ImpactAnalyzer.extractTouchedMethods(f, content);
-                    debug("Fallback regex touched methods: " + touchedMethods);
-                }
+                List<String> touchedMethods = ImpactAnalyzer.extractTouchedMethods(f, content);
+                debug("Touched methods: " + touchedMethods);
                 touchedMethods = ImpactAnalyzer.filterValidMethodNames(touchedMethods);
                 debug("Filtered touched methods: " + touchedMethods);
+
                 if (!touchedMethods.isEmpty()) {
                     entry.functions.addAll(touchedMethods);
                 }
 
-                if (!touchedMethods.isEmpty() && (content.contains("@RestController") || content.contains("@Controller"))) {
+                // Intra-class expansion on the source file itself:
+                // Without this, dependents only see the private method name which they never call
+                // directly, so caller detection in dependents returns 0 and BFS terminates early.
+                // Stored separately so entry.functions only shows the directly changed methods.
+                List<String> bfsTouchedMethods = touchedMethods;
+                if (!touchedMethods.isEmpty()) {
+                    List<String> expanded = ImpactAnalyzer.expandWithIntraClassCallers(content, touchedMethods);
+                    expanded = ImpactAnalyzer.filterValidMethodNames(expanded);
+                    if (expanded.size() > touchedMethods.size()) {
+                        debug("Source intra-class expansion: " + touchedMethods + " -> " + expanded);
+                        bfsTouchedMethods = expanded;
+                    }
+                }
+
+                if (!bfsTouchedMethods.isEmpty() && (content.contains("@RestController") || content.contains("@Controller"))) {
                     if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
-                    boolean multiTouched = touchedMethods.size() > 1;
+                    boolean multiTouched = bfsTouchedMethods.size() > 1;
                     if (multiTouched) {
-                        for (String tm : touchedMethods) {
+                        for (String tm : bfsTouchedMethods) {
                             // Expand to include annotated handlers that delegate to this touched method.
                             List<String> tmScope = ImpactAnalyzer.expandWithIntraClassCallers(content, Collections.singletonList(tm));
-                            List<String> eps = null;
-                            if (com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
-                                eps = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(content, className, tmScope);
-                                debug("Controller self endpoints (tree-sitter) for " + tm + ": " + eps);
-                            }
-                            if (eps == null || eps.isEmpty()) {
-                                eps = ImpactAnalyzer.extractControllerEndpoints(content, className, tmScope);
-                                debug("Controller self endpoints (regex) for " + tm + ": " + eps);
-                            }
+                            List<String> eps = ImpactAnalyzer.extractControllerEndpoints(content, className, tmScope);
+                            debug("Controller self endpoints for " + tm + ": " + eps);
                             if (eps != null) {
                                 for (String ep : eps) {
                                     entry.endpoints.add(ep + " [via " + tm + "()]");
@@ -643,16 +721,9 @@ public class ReviewEngine {
                         }
                     } else {
                         // Expand to include annotated handlers that delegate to any touched method.
-                        List<String> tmScope = ImpactAnalyzer.expandWithIntraClassCallers(content, touchedMethods);
-                        List<String> endpoints = null;
-                        if (com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
-                            endpoints = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(content, className, tmScope);
-                            debug("Controller self endpoints (tree-sitter): " + endpoints);
-                        }
-                        if (endpoints == null || endpoints.isEmpty()) {
-                            endpoints = ImpactAnalyzer.extractControllerEndpoints(content, className, tmScope);
-                            debug("Controller self endpoints (regex): " + endpoints);
-                        }
+                        List<String> tmScope = ImpactAnalyzer.expandWithIntraClassCallers(content, bfsTouchedMethods);
+                        List<String> endpoints = ImpactAnalyzer.extractControllerEndpoints(content, className, tmScope);
+                        debug("Controller self endpoints: " + endpoints);
                         if (endpoints != null) {
                             entry.endpoints.addAll(endpoints);
                         }
@@ -660,13 +731,13 @@ public class ReviewEngine {
                 }
 
                 // OpenAPI delegate detection: changed file itself implements *ApiDelegate
-                if (!touchedMethods.isEmpty() && implementsApiDelegate(content, config.openApiDelegateSuffix)) {
+                if (!bfsTouchedMethods.isEmpty() && implementsApiDelegate(content, config.openApiDelegateSuffix)) {
                     Map<String, String> opMap = getOpenApiOperationMap();
                     List<String> delegateInterfaces = extractDelegateInterfaces(content, config.openApiDelegateSuffix);
                     debug("OpenAPI delegate interfaces in " + className + ": " + delegateInterfaces);
                     // Direct mode: developer changed this file, so touched methods may be operationId methods directly.
                     // Also scan full content in case they changed an internal helper — surface all exposed operationIds.
-                    List<String> openApiEndpoints = resolveOpenApiEndpoints(delegateInterfaces, touchedMethods, opMap, className, content);
+                    List<String> openApiEndpoints = resolveOpenApiEndpoints(delegateInterfaces, bfsTouchedMethods, opMap, className, content);
                     if (!openApiEndpoints.isEmpty()) {
                         if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
                         entry.endpoints.addAll(openApiEndpoints);
@@ -689,7 +760,7 @@ public class ReviewEngine {
                     // 1. Identify WHICH methods in the dependent call the service, attributed per
                     //    touched method so notes and endpoints carry [via tm()] when >1 method changed.
                     Map<String, List<String>> callerToVia = new LinkedHashMap<>();
-                    for (String tm : touchedMethods) {
+                    for (String tm : bfsTouchedMethods) {
                         List<String> callers = ImpactAnalyzer.getMethodsCalling(
                                 depContent, classInfo.simpleName, classInfo.fqn,
                                 classInfo.supertypeSimpleNames,
@@ -705,7 +776,7 @@ public class ReviewEngine {
                         // Track method-scoped dependents for the graph display.
                         entry.methodScopedDependents.add(dependentFile);
                         String depType = classifyDependencyType(depContent, classInfo);
-                        boolean multiTouched = touchedMethods.size() > 1;
+                        boolean multiTouched = bfsTouchedMethods.size() > 1;
                         for (Map.Entry<String, List<String>> e : callerToVia.entrySet()) {
                             String via = multiTouched
                                     ? " [via " + e.getValue().stream().map(m -> m + "()").collect(Collectors.joining(", ")) + "]"
@@ -720,17 +791,9 @@ public class ReviewEngine {
                                 // Expand each caller to include annotated handlers that delegate to it.
                                 for (Map.Entry<String, List<String>> e : callerToVia.entrySet()) {
                                     List<String> callerScope = ImpactAnalyzer.expandWithIntraClassCallers(depContent, Collections.singletonList(e.getKey()));
-                                    List<String> eps = null;
-                                    if (config.enableStructuralImpact && com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
-                                        eps = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(
+                                    List<String> eps = ImpactAnalyzer.extractControllerEndpoints(
                                                 depContent, depClassName, callerScope);
-                                        debug("Tree-sitter endpoints for " + depFileName + " caller " + e.getKey() + ": " + eps);
-                                    }
-                                    if (eps == null || eps.isEmpty()) {
-                                        eps = ImpactAnalyzer.extractControllerEndpoints(
-                                                depContent, depClassName, callerScope);
-                                        debug("Regex endpoints for " + depFileName + " caller " + e.getKey() + ": " + eps);
-                                    }
+                                    debug("Endpoints for " + depFileName + " caller " + e.getKey() + ": " + eps);
                                     if (eps != null) {
                                         String via = " [via " + e.getValue().stream().map(m -> m + "()").collect(Collectors.joining(", ")) + "]";
                                         for (String ep : eps) {
@@ -741,17 +804,8 @@ public class ReviewEngine {
                             } else {
                                 // Expand callingMethods to include annotated handlers that delegate to them.
                                 List<String> callerScope = ImpactAnalyzer.expandWithIntraClassCallers(depContent, callingMethods);
-                                List<String> endpoints = null;
-                                // TreeSitter needs the Controller's own methods to find mapping annotations
-                                if (config.enableStructuralImpact && com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
-                                    endpoints = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(depContent, depClassName, callerScope);
-                                    debug("Tree-sitter endpoints for " + depFileName + ": " + endpoints);
-                                }
-                                // Regex fallback needs the CONTROLLER methods to find the impacted endpoints
-                                if (endpoints == null || endpoints.isEmpty()) {
-                                    endpoints = ImpactAnalyzer.extractControllerEndpoints(depContent, depClassName, callerScope);
-                                    debug("Regex endpoints for " + depFileName + ": " + endpoints);
-                                }
+                                List<String> endpoints = ImpactAnalyzer.extractControllerEndpoints(depContent, depClassName, callerScope);
+                                debug("Endpoints for " + depFileName + ": " + endpoints);
                                 if (endpoints != null) {
                                     entry.endpoints.addAll(endpoints);
                                 }
@@ -774,34 +828,111 @@ public class ReviewEngine {
                                     entry.endpoints.addAll(openApiEps);
                                 }
                             }
+                        } else if (depContent.contains("@WebService") || depContent.contains("@WebMethod")) {
+                            if (!entry.layers.contains("SOAP")) entry.layers.add("SOAP");
+                            List<String> soapOps = ImpactAnalyzer.extractSoapOperations(depContent, callingMethods);
+                            if (multiTouched) {
+                                String via = " [via " + touchedMethods.stream().map(m -> m + "()").collect(Collectors.joining(", ")) + "]";
+                                for (String op : soapOps) entry.endpoints.add(op + via);
+                            } else {
+                                entry.endpoints.addAll(soapOps);
+                            }
+                        } else if (depContent.contains("@FeignClient")) {
+                            if (!entry.layers.contains("Feign Client")) entry.layers.add("Feign Client");
+                            List<String> feignOps = ImpactAnalyzer.extractFeignOperations(depContent, callingMethods);
+                            if (multiTouched) {
+                                String via = " [via " + touchedMethods.stream().map(m -> m + "()").collect(Collectors.joining(", ")) + "]";
+                                for (String op : feignOps) entry.endpoints.add(op + via);
+                            } else {
+                                entry.endpoints.addAll(feignOps);
+                            }
+                        } else if (depContent.contains("ManagedChannel") || depContent.contains("newBlockingStub")) {
+                            if (!entry.layers.contains("gRPC Client")) entry.layers.add("gRPC Client");
+                            List<String> grpcOps = ImpactAnalyzer.extractGrpcOperations(depContent, callingMethods);
+                            if (multiTouched) {
+                                String via = " [via " + touchedMethods.stream().map(m -> m + "()").collect(Collectors.joining(", ")) + "]";
+                                for (String op : grpcOps) entry.endpoints.add(op + via);
+                            } else {
+                                entry.endpoints.addAll(grpcOps);
+                            }
+                        } else if (depContent.contains("implements Job") || depContent.contains("JobDetail")) {
+                            if (!entry.layers.contains("Scheduled/Quartz")) entry.layers.add("Scheduled/Quartz");
                         } else if (depContent.contains("@Service")) {
                             if (!entry.layers.contains("Service")) entry.layers.add("Service");
                         }
                     }
                 }
 
+                // Self-detection for non-REST API surface: SOAP, Feign, gRPC, Quartz
+                if (!bfsTouchedMethods.isEmpty()) {
+                    if (content.contains("@WebService") || content.contains("@WebMethod")) {
+                        if (!entry.layers.contains("SOAP")) entry.layers.add("SOAP");
+                        List<String> soapOps = ImpactAnalyzer.extractSoapOperations(content, bfsTouchedMethods);
+                        entry.endpoints.addAll(soapOps);
+                    }
+                    if (content.contains("@FeignClient")) {
+                        if (!entry.layers.contains("Feign Client")) entry.layers.add("Feign Client");
+                        List<String> feignOps = ImpactAnalyzer.extractFeignOperations(content, bfsTouchedMethods);
+                        entry.endpoints.addAll(feignOps);
+                    }
+                    if (content.contains("ManagedChannel") || content.contains("newBlockingStub")) {
+                        if (!entry.layers.contains("gRPC Client")) entry.layers.add("gRPC Client");
+                        List<String> grpcOps = ImpactAnalyzer.extractGrpcOperations(content, bfsTouchedMethods);
+                        entry.endpoints.addAll(grpcOps);
+                    }
+                    if (content.contains("implements Job") || content.contains("JobDetail")) {
+                        if (!entry.layers.contains("Scheduled/Quartz")) entry.layers.add("Scheduled/Quartz");
+                    }
+                }
+
                 boolean isController = content.contains("@RestController") || content.contains("@Controller");
-                if (config.enableTransitiveApiDiscovery && !isController && !touchedMethods.isEmpty()) {
+                if (config.enableTransitiveApiDiscovery && !isController && !bfsTouchedMethods.isEmpty()) {
                     debug("Attempting transitive controller discovery for " + classInfo.fqn);
                     Set<String> existingEndpoints = new HashSet<>(entry.endpoints);
-                    Map<String, List<String>> endpointsByMethod = discoverTransitiveControllerEndpointsByMethod(
-                            classInfo,
-                            touchedMethods,
+
+                    // Run BFS once with the full expanded set — produces a consolidated unique list.
+                    List<String> consolidatedEndpoints = discoverTransitiveControllerEndpoints(
+                            classInfo, bfsTouchedMethods,
                             config.transitiveApiDiscoveryMaxDepth,
                             config.transitiveApiDiscoveryMaxVisitedFiles,
-                            config.transitiveApiDiscoveryMaxControllers
-                    );
-                    if (!endpointsByMethod.isEmpty()) {
+                            config.transitiveApiDiscoveryMaxControllers);
+
+                    if (!consolidatedEndpoints.isEmpty()) {
                         if (!entry.layers.contains("API/Web")) entry.layers.add("API/Web");
-                        for (Map.Entry<String, List<String>> methodEntry : endpointsByMethod.entrySet()) {
-                            String touchedMethod = methodEntry.getKey();
-                            List<String> endpoints = methodEntry.getValue();
-                            entry.endpointsByMethod.computeIfAbsent(touchedMethod, k -> new ArrayList<>()).addAll(endpoints);
-                            for (String ep : endpoints) {
-                                if (!existingEndpoints.contains(ep)) {
-                                    entry.endpoints.add(ep);
+                        for (String ep : consolidatedEndpoints) {
+                            if (!existingEndpoints.contains(ep)) entry.endpoints.add(ep);
+                        }
+
+                        // Only produce per-method breakdown when there are multiple *directly* changed
+                        // methods and their individual BFS results are genuinely different.
+                        if (touchedMethods.size() > 1) {
+                            Map<String, List<String>> perMethod = new LinkedHashMap<>();
+                            for (String tm : touchedMethods) {
+                                // Find which bfs-expanded methods originated from this touched method.
+                                // Use the touched method itself + any bfs expansions that call it.
+                                List<String> tmBfsMethods = new ArrayList<>();
+                                tmBfsMethods.add(tm);
+                                for (String bm : bfsTouchedMethods) {
+                                    if (!bm.equals(tm) && !tmBfsMethods.contains(bm)) tmBfsMethods.add(bm);
+                                }
+                                List<String> tmEndpoints = discoverTransitiveControllerEndpoints(
+                                        classInfo, tmBfsMethods,
+                                        config.transitiveApiDiscoveryMaxDepth,
+                                        config.transitiveApiDiscoveryMaxVisitedFiles,
+                                        config.transitiveApiDiscoveryMaxControllers);
+                                if (!tmEndpoints.isEmpty()) perMethod.put(tm, tmEndpoints);
+                            }
+                            // Only use per-method view if at least two methods have different endpoint sets.
+                            boolean allSame = perMethod.values().stream()
+                                    .map(l -> new HashSet<>(l))
+                                    .distinct().count() <= 1;
+                            if (!allSame) {
+                                for (Map.Entry<String, List<String>> me : perMethod.entrySet()) {
+                                    entry.endpointsByMethod.computeIfAbsent(me.getKey(), k -> new ArrayList<>())
+                                            .addAll(me.getValue());
                                 }
                             }
+                            // If all same, endpointsByMethod stays empty → consolidated view is used.
                         }
                     }
                 }
@@ -934,9 +1065,9 @@ public class ReviewEngine {
                     // and extractControllerEndpoints returns empty; createOrder would be missed.
                     List<String> callerScope = ImpactAnalyzer.expandWithIntraClassCallers(depContent, callingMethods);
                     List<String> controllerEndpoints = null;
-                    if (config.enableStructuralImpact && com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
+                    /*if (config.enableStructuralImpact && com.reviewer.analysis.TreeSitterAnalyzer.isAvailable()) {
                         controllerEndpoints = com.reviewer.analysis.TreeSitterAnalyzer.extractImpactedEndpoints(depContent, depInfo.simpleName, callerScope);
-                    }
+                    }*/
                     if (controllerEndpoints == null || controllerEndpoints.isEmpty()) {
                         controllerEndpoints = ImpactAnalyzer.extractControllerEndpoints(depContent, depInfo.simpleName, callerScope);
                     }
@@ -988,7 +1119,10 @@ public class ReviewEngine {
             return Collections.emptySet();
         }
         Set<String> existing = reverseDependencyGraph.get(fqn);
-        if (existing != null) {
+        // Only trust a non-empty cached result. An empty set may come from a stale
+        // on-disk cache that was built before callers were added — in that case we
+        // do a fresh scan so newly added callers are not silently missed.
+        if (existing != null && !existing.isEmpty()) {
             return existing;
         }
         JavaSymbolIndex.ClassInfo targetInfo = null;
@@ -1142,6 +1276,14 @@ public class ReviewEngine {
                 return null;
             }
 
+            // Invalidate if any .java file in the repo is newer than the cache timestamp.
+            // This catches the case where a new caller was added or an existing caller was
+            // modified between runs — their dependency edges would be missing from the cache.
+            if (anySourceNewerThan(cachedAt)) {
+                debug("Graph cache stale — a source file is newer than the cache, rebuilding.");
+                return null;
+            }
+
             String expectedKey = "KEY=" + buildCacheKey(changedFiles);
             if (!expectedKey.equals(lines.get(2))) return null;
 
@@ -1190,9 +1332,31 @@ public class ReviewEngine {
     }
 
     /**
-     * Builds a stable cache key from the changed files' paths and modification times.
-     * Any file content change or set change invalidates the cache.
+     * Returns true if any .java file under the repo root has a last-modified time
+     * strictly newer than {@code cachedAtMs}. Skips target/, build/, .git/ directories.
+     * Short-circuits on the first match to keep overhead minimal.
      */
+    private boolean anySourceNewerThan(long cachedAtMs) {
+        try (Stream<Path> walk = Files.walk(repoRoot)) {
+            return walk.filter(Files::isRegularFile)
+                       .filter(p -> p.toString().endsWith(".java"))
+                       .filter(p -> {
+                           String s = p.toString().replace('\\', '/');
+                           return !s.contains("/target/") && !s.contains("/build/") && !s.contains("/.git/");
+                       })
+                       .anyMatch(p -> {
+                           try {
+                               return Files.getLastModifiedTime(p).toMillis() > cachedAtMs;
+                           } catch (IOException e) {
+                               return false;
+                           }
+                       });
+        } catch (IOException e) {
+            debug("anySourceNewerThan walk failed: " + e.getMessage());
+            return true;
+        }
+    }
+
     private String buildCacheKey(List<ChangedFile> changedFiles) {
         return changedFiles.stream()
             .sorted(Comparator.comparing(f -> f.path))
@@ -1243,21 +1407,27 @@ public class ReviewEngine {
         return candidate;
     }
 
-    private int getLineNumber(String content, int index) {
-        return (int) content.substring(0, Math.min(index, content.length())).chars().filter(c -> c == '\n').count() + 1;
-    }
-
     private void printNoChanges() {
         System.out.println(ColorConsole.CYAN + "\nNo Java files changed. Nothing to review.\n" + ColorConsole.RESET);
     }
 
     private List<String> runGit(String... cmd) {
+        Process p = null;
         try {
-            Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            List<String> lines;
+            // Drain stdout fully before waitFor — avoids pipe-buffer deadlock on large output
             try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-                return r.lines().collect(Collectors.toList());
+                lines = r.lines().collect(Collectors.toList());
             }
+            boolean finished = p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS);
+            if (!finished) {
+                p.destroyForcibly();
+                return Collections.emptyList();
+            }
+            return lines;
         } catch (Exception e) {
+            if (p != null) p.destroyForcibly();
             return Collections.emptyList();
         }
     }
@@ -1266,13 +1436,32 @@ public class ReviewEngine {
         System.out.println(ColorConsole.CYAN + "\n--- Code Review Summary ---" + ColorConsole.RESET);
         System.out.println("Branch: " + currentBranch);
         System.out.println("Staged Files: " + totalStagedFiles);
-        
-        long mustFix = findings.stream().filter(f -> f.severity == Severity.MUST_FIX).count();
+
+        long mustFix   = findings.stream().filter(f -> f.severity == Severity.MUST_FIX).count();
+        long shouldFix = findings.stream().filter(f -> f.severity == Severity.SHOULD_FIX).count();
+        long consider  = findings.stream().filter(f -> f.severity == Severity.CONSIDER).count();
+
         if (mustFix > 0) {
-            System.out.println(ColorConsole.RED + "Critical Issues (MUST FIX): " + mustFix + ColorConsole.RESET);
+            System.out.println(ColorConsole.RED + "MUST FIX: " + mustFix + ColorConsole.RESET);
         }
-        
-        System.out.println("Java Issues: " + findings.size());
+        if (shouldFix > 0) {
+            System.out.println(ColorConsole.YELLOW + "SHOULD FIX: " + shouldFix + ColorConsole.RESET);
+        }
+        if (consider > 0) {
+            System.out.println("CONSIDER: " + consider);
+        }
+        System.out.println("Total Issues: " + findings.size());
+
+        // Per-category breakdown
+        if (!findings.isEmpty()) {
+            System.out.println(ColorConsole.CYAN + "\nBy Category:" + ColorConsole.RESET);
+            for (Category cat : Category.values()) {
+                long cnt = findings.stream().filter(f -> f.category == cat).count();
+                if (cnt > 0) {
+                    System.out.println("  " + cat.displayName + ": " + cnt);
+                }
+            }
+        }
     }
 
     private static class LineRange {
