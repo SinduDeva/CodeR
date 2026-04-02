@@ -5,6 +5,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -13,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -26,24 +28,35 @@ public class JavaSymbolIndex {
         "(?:class|interface|enum|record)\\s+(\\w+)"
     );
     private static final Pattern IMPORT_PATTERN = Pattern.compile("(?m)^\\s*import\\s+([\\w\\.\\*]+)\\s*;");
+    private static final Pattern EXTENDS_CLAUSE  = Pattern.compile("\\bextends\\s+(.+?)(?=\\bimplements\\b|\\{)");
+    private static final Pattern IMPLEMENTS_CLAUSE = Pattern.compile("\\bimplements\\s+(.+?)(?=\\{)");
+    // Caches Pattern.compile("\\b<token>\\b") — built once per unique token per JVM session
+    private static final Map<String, Pattern> TOKEN_PATTERN_CACHE = new ConcurrentHashMap<>();
+    private static final Pattern AUTOWIRED_PATTERN = Pattern.compile(
+        "@(?:Autowired|Inject)\\b[\\s\\n]*(?:(?:\\((?:[^)]*)\\)\\s*)?)*[\\s\\n]*" +
+        "([\\w\\.]+)(?:<[^>]*>)?\\s+\\w+\\b",
+        Pattern.MULTILINE
+    );
 
-    private final Map<String, ClassInfo> classesByPath = new HashMap<>();
-    private final Map<String, Set<ClassInfo>> classesBySimpleName = new HashMap<>();
+    private final Map<String, ClassInfo> classesByPath = new ConcurrentHashMap<>();
+    private final Map<String, Set<ClassInfo>> classesBySimpleName = new ConcurrentHashMap<>();
 
     private JavaSymbolIndex() {}
 
     public static JavaSymbolIndex build(Path repoRoot) throws IOException {
         JavaSymbolIndex index = new JavaSymbolIndex();
+        List<Path> eligible;
         try (Stream<Path> paths = Files.walk(repoRoot)) {
-            paths.filter(Files::isRegularFile)
-                 .filter(p -> p.toString().endsWith(".java"))
-                 .filter(JavaSymbolIndex::isEligibleSourceFile)
-                 .forEach(p -> {
-                     try {
-                         parseClassInfo(p).ifPresent(index::add);
-                     } catch (IOException ignored) {}
-                 });
+            eligible = paths.filter(Files::isRegularFile)
+                            .filter(p -> p.toString().endsWith(".java"))
+                            .filter(JavaSymbolIndex::isEligibleSourceFile)
+                            .collect(Collectors.toList());
         }
+        eligible.parallelStream().forEach(p -> {
+            try {
+                parseClassInfo(p).ifPresent(index::add);
+            } catch (IOException ignored) {}
+        });
         return index;
     }
 
@@ -58,7 +71,11 @@ public class JavaSymbolIndex {
 
     private void add(ClassInfo info) {
         classesByPath.put(normalize(info.path), info);
-        classesBySimpleName.computeIfAbsent(info.simpleName, k -> new HashSet<>()).add(info);
+        classesBySimpleName.compute(info.simpleName, (k, existing) -> {
+            Set<ClassInfo> set = (existing != null) ? existing : ConcurrentHashMap.newKeySet();
+            set.add(info);
+            return set;
+        });
     }
 
     public Optional<ClassInfo> getClassInfo(Path path) {
@@ -75,6 +92,15 @@ public class JavaSymbolIndex {
     }
 
     public Map<String, Set<String>> buildReverseDependencyGraph(Collection<ClassInfo> targets) {
+        return buildReverseDependencyGraph(targets, null);
+    }
+
+    /**
+     * Builds a reverse dependency graph for the given targets.
+     * @param contentCache optional shared in-memory cache (path -> content); entries are read from
+     *                     and written to the cache so callers avoid redundant disk reads.
+     */
+    public Map<String, Set<String>> buildReverseDependencyGraph(Collection<ClassInfo> targets, Map<String, String> contentCache) {
         Map<String, Set<String>> graph = new LinkedHashMap<>();
         if (targets == null || targets.isEmpty()) {
             return graph;
@@ -84,24 +110,56 @@ public class JavaSymbolIndex {
             graph.putIfAbsent(target.fqn, new LinkedHashSet<>());
         }
 
+        // Pre-resolve each target's supertypes through the index so that dependsOn() can
+        // use the interface's actual package rather than the implementation's package.
+        // Example: HelperImpl (com.example.impl) implements IHelper (com.example.service).
+        // A caller that imports com.example.service.IHelper was previously missed because
+        // the check used "com.example.impl.IHelper" as the expected import.
+        Map<String, Map<String, Set<ClassInfo>>> resolvedSupertypesPerTarget = new HashMap<>();
+        for (ClassInfo target : targets) {
+            resolvedSupertypesPerTarget.put(target.fqn, resolveSupertypes(target));
+        }
+
         for (ClassInfo candidate : classesByPath.values()) {
             String content;
-            try {
-                content = Files.readString(candidate.path);
-            } catch (IOException e) {
-                continue;
+            String cacheKey = candidate.path.toString();
+            if (contentCache != null && contentCache.containsKey(cacheKey)) {
+                content = contentCache.get(cacheKey);
+            } else {
+                try {
+                    content = Files.readString(candidate.path);
+                    if (contentCache != null) contentCache.put(cacheKey, content);
+                } catch (IOException e) {
+                    continue;
+                }
             }
 
             Imports imports = parseImports(content);
             for (ClassInfo target : targets) {
                 boolean unique = isSimpleNameUnique(target.simpleName);
-                if (dependsOn(content, imports, candidate, target, unique)) {
+                Map<String, Set<ClassInfo>> resolvedSupertypes = resolvedSupertypesPerTarget.get(target.fqn);
+                if (dependsOn(content, imports, candidate, target, unique, resolvedSupertypes)) {
                     graph.computeIfAbsent(target.fqn, k -> new LinkedHashSet<>()).add(candidate.path.toString());
                 }
             }
         }
 
         return graph;
+    }
+
+    /**
+     * Resolves each direct supertype simple name of {@code target} to the matching
+     * {@link ClassInfo}(s) in the index.  The result is keyed by simple name and may
+     * contain multiple entries when simple names are ambiguous across packages.
+     */
+    private Map<String, Set<ClassInfo>> resolveSupertypes(ClassInfo target) {
+        if (target.supertypeSimpleNames.isEmpty()) return Collections.emptyMap();
+        Map<String, Set<ClassInfo>> result = new LinkedHashMap<>();
+        for (String name : target.supertypeSimpleNames) {
+            Set<ClassInfo> found = classesBySimpleName.getOrDefault(name, Collections.emptySet());
+            if (!found.isEmpty()) result.put(name, found);
+        }
+        return result;
     }
 
     public static Optional<ClassInfo> parseClassInfo(Path path) throws IOException {
@@ -113,7 +171,61 @@ public class JavaSymbolIndex {
         String pkg = pkgMatcher.find() ? pkgMatcher.group(1) : "";
         String simpleName = typeMatcher.group(1);
         String fqn = pkg.isEmpty() ? simpleName : pkg + "." + simpleName;
-        return Optional.of(new ClassInfo(path.toAbsolutePath().normalize(), pkg, simpleName, fqn));
+        List<String> supertypes = parseSupertypeSimpleNames(content, typeMatcher.end());
+        return Optional.of(new ClassInfo(path.toAbsolutePath().normalize(), pkg, simpleName, fqn, supertypes));
+    }
+
+    /** Extracts simple names of superclasses and interfaces from the class header (between class name and opening brace). */
+    private static List<String> parseSupertypeSimpleNames(String content, int fromPos) {
+        int bracePos = content.indexOf('{', fromPos);
+        if (bracePos == -1) return Collections.emptyList();
+        String header = content.substring(fromPos, bracePos);
+
+        List<String> supertypes = new ArrayList<>();
+
+        Matcher extMatcher = EXTENDS_CLAUSE.matcher(header);
+        if (extMatcher.find()) {
+            for (String token : splitTypeList(extMatcher.group(1))) {
+                String s = simpleNameOf(token);
+                if (!s.isEmpty()) supertypes.add(s);
+            }
+        }
+
+        Matcher implMatcher = IMPLEMENTS_CLAUSE.matcher(header);
+        if (implMatcher.find()) {
+            for (String token : splitTypeList(implMatcher.group(1))) {
+                String s = simpleNameOf(token);
+                if (!s.isEmpty()) supertypes.add(s);
+            }
+        }
+
+        return supertypes;
+    }
+
+    /** Splits a comma-separated type list, respecting angle-bracket nesting (e.g. "B<K,V>, C"). */
+    private static List<String> splitTypeList(String types) {
+        List<String> result = new ArrayList<>();
+        int depth = 0, start = 0;
+        for (int i = 0; i < types.length(); i++) {
+            char c = types.charAt(i);
+            if (c == '<') depth++;
+            else if (c == '>') depth--;
+            else if (c == ',' && depth == 0) {
+                result.add(types.substring(start, i).trim());
+                start = i + 1;
+            }
+        }
+        String last = types.substring(start).trim();
+        if (!last.isEmpty()) result.add(last);
+        return result;
+    }
+
+    /** Returns the simple name of a (possibly qualified, possibly generic) type token. */
+    private static String simpleNameOf(String type) {
+        int lt = type.indexOf('<');
+        String base = lt >= 0 ? type.substring(0, lt).trim() : type.trim();
+        int dot = base.lastIndexOf('.');
+        return dot >= 0 ? base.substring(dot + 1) : base;
     }
 
     public static Imports parseImports(String content) {
@@ -132,6 +244,19 @@ public class JavaSymbolIndex {
     }
 
     public static boolean dependsOn(String content, Imports imports, ClassInfo candidate, ClassInfo target, boolean simpleNameUnique) {
+        return dependsOn(content, imports, candidate, target, simpleNameUnique, null);
+    }
+
+    /**
+     * Returns true when {@code candidate} directly or indirectly references {@code target}.
+     *
+     * @param resolvedSupertypes optional map of supertype simple name → index-resolved ClassInfo set;
+     *                           when provided the check uses each supertype's real package/FQN rather
+     *                           than the implementation class's package, correctly handling the common
+     *                           case where an interface lives in a different package from its impl.
+     */
+    static boolean dependsOn(String content, Imports imports, ClassInfo candidate, ClassInfo target,
+                              boolean simpleNameUnique, Map<String, Set<ClassInfo>> resolvedSupertypes) {
         if (candidate == null || target == null) return false;
         if (candidate.fqn.equals(target.fqn)) return false;
 
@@ -140,6 +265,75 @@ public class JavaSymbolIndex {
         if (imports.hasWildcard(target.packageName) && simpleToken) return true;
         if (!target.packageName.isEmpty() && candidate.packageName.equals(target.packageName) && simpleToken && isSameModule(candidate.path, target.path)) return true;
         if (containsToken(content, target.fqn)) return true;
+
+        // Check if candidate depends on any of target's supertypes (interfaces / superclass).
+        // Handles the common Spring pattern: inject UserService (interface) while the changed
+        // file is UserServiceImpl.  The candidate imports the interface, not the implementation.
+        for (String supertype : target.supertypeSimpleNames) {
+            if (!containsToken(content, supertype)) continue;
+
+            // Use the index-resolved ClassInfo(s) for the supertype when available so the import
+            // check uses the interface's actual package — not the implementation's package.
+            Set<ClassInfo> supertypeInfos = (resolvedSupertypes != null)
+                    ? resolvedSupertypes.getOrDefault(supertype, Collections.emptySet())
+                    : Collections.emptySet();
+
+            if (!supertypeInfos.isEmpty()) {
+                for (ClassInfo si : supertypeInfos) {
+                    if (imports.hasExplicit(si.fqn)) return true;
+                    if (imports.hasWildcard(si.packageName)) return true;
+                    if (!si.packageName.isEmpty()
+                            && candidate.packageName.equals(si.packageName)
+                            && isSameModule(candidate.path, si.path)) return true;
+                }
+            } else {
+                // Fallback when the supertype is not in the index (e.g. external library):
+                // use the target's own package as a best-effort approximation.
+                if (imports.hasExplicit(target.packageName + "." + supertype)) return true;
+                if (imports.hasWildcard(target.packageName)) return true;
+                if (!target.packageName.isEmpty()
+                        && candidate.packageName.equals(target.packageName)
+                        && isSameModule(candidate.path, target.path)) return true;
+            }
+        }
+
+        // Enhancement: detect @Autowired/@Inject field/param types and match against target's supertypes.
+        // Handles the case where candidate injects target via an interface, possibly through inheritance.
+        // Example: Controller extends BaseController; BaseController has @Autowired IUserService service;
+        // This makes Controller depend on UserServiceImpl even though Controller doesn't directly import anything.
+        return hasAutowiredDependencyOn(content, target);
+    }
+
+    /**
+     * Detects if {@code content} has @Autowired/@Inject fields/parameters typed as
+     * (or implementing) one of {@code target}'s supertypes.
+     *
+     * Example: if target is UserServiceImpl with supertypes=[IUserService],
+     * and content has @Autowired IUserService service; then returns true.
+     * This is particularly important for base classes that inject interfaces,
+     * and subclasses that inherit those injections.
+     */
+    private static boolean hasAutowiredDependencyOn(String content, ClassInfo target) {
+        if (target == null || target.supertypeSimpleNames.isEmpty()) {
+            return false;
+        }
+
+        Matcher matcher = AUTOWIRED_PATTERN.matcher(content);
+        while (matcher.find()) {
+            String fieldType = matcher.group(1);
+            // Extract simple name (last component after dots)
+            String fieldTypeSimple = fieldType.contains(".")
+                ? fieldType.substring(fieldType.lastIndexOf('.') + 1)
+                : fieldType;
+
+            // Check if this field type matches any of target's supertypes (interfaces/superclass)
+            for (String supertype : target.supertypeSimpleNames) {
+                if (fieldTypeSimple.equals(supertype)) {
+                    return true;
+                }
+            }
+        }
+
         return false;
     }
 
@@ -164,7 +358,8 @@ public class JavaSymbolIndex {
 
     private static boolean containsToken(String content, String token) {
         if (token == null || token.isEmpty()) return false;
-        Pattern p = Pattern.compile("\\b" + Pattern.quote(token) + "\\b");
+        Pattern p = TOKEN_PATTERN_CACHE.computeIfAbsent(token,
+            k -> Pattern.compile("\\b" + Pattern.quote(k) + "\\b"));
         return p.matcher(content).find();
     }
 
@@ -199,12 +394,21 @@ public class JavaSymbolIndex {
         public final String packageName;
         public final String simpleName;
         public final String fqn;
+        /** Simple names of superclass and implemented interfaces (e.g. ["UserService", "Auditable"]). */
+        public final List<String> supertypeSimpleNames;
 
         public ClassInfo(Path path, String packageName, String simpleName, String fqn) {
+            this(path, packageName, simpleName, fqn, Collections.emptyList());
+        }
+
+        public ClassInfo(Path path, String packageName, String simpleName, String fqn, List<String> supertypeSimpleNames) {
             this.path = path;
             this.packageName = packageName == null ? "" : packageName;
             this.simpleName = simpleName;
             this.fqn = fqn;
+            this.supertypeSimpleNames = supertypeSimpleNames == null
+                ? Collections.emptyList()
+                : Collections.unmodifiableList(new ArrayList<>(supertypeSimpleNames));
         }
     }
 }

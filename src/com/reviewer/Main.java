@@ -14,7 +14,11 @@ public class Main {
         try {
             Config config = loadConfig();
             ReviewEngine engine = new ReviewEngine(config);
-            
+            System.out.println("[INFO] JavaParser AST analysis: " +
+                (com.reviewer.analysis.AstInvocationFinder.isAvailable()
+                    ? (config.useAstCallerDetection ? "enabled" : "available but disabled (use.ast.caller.detection=false)")
+                    : "unavailable — javaparser-core.jar not on classpath (regex fallback active)"));
+
             List<ChangedFile> files = new ArrayList<>();
             if (args.length == 0) {
                 // Hook mode: auto-detect staged files
@@ -25,10 +29,18 @@ public class Main {
                 System.exit(0);
             } else {
                 for (String arg : args) {
-                    Path p = Paths.get(arg);
-                    if (Files.exists(p)) {
-                        files.add(new ChangedFile(p.toString(), p.getFileName().toString(), Collections.emptySet()));
+                    if (arg.equals("--rebuild-graph")) {
+                        config.rebuildGraphCache = true;
+                    } else {
+                        Path p = Paths.get(arg);
+                        if (Files.exists(p)) {
+                            files.add(new ChangedFile(p.toString(), p.getFileName().toString(), Collections.emptySet()));
+                        }
                     }
+                }
+                // --rebuild-graph alone: still analyse staged files
+                if (files.isEmpty()) {
+                    files = engine.getStagedFiles();
                 }
             }
 
@@ -110,10 +122,10 @@ public class Main {
         config.expandChangedScopeToMethod = Boolean.parseBoolean(props.getProperty("expand.changed.scope.to.method", String.valueOf(config.expandChangedScopeToMethod)));
         config.strictJava = Boolean.parseBoolean(props.getProperty("strict.java", String.valueOf(config.strictJava)));
         config.strictSpring = Boolean.parseBoolean(props.getProperty("strict.spring", String.valueOf(config.strictSpring)));
-        config.showGoodPatterns = Boolean.parseBoolean(props.getProperty("show.good.patterns", String.valueOf(config.showGoodPatterns)));
         config.showTestingScope = Boolean.parseBoolean(props.getProperty("show.testing.scope", String.valueOf(config.showTestingScope)));
         config.openReport = Boolean.parseBoolean(props.getProperty("open.report", String.valueOf(config.openReport)));
         config.debug = Boolean.parseBoolean(props.getProperty("debug", String.valueOf(config.debug)));
+        config.enableImpactAnalysis = Boolean.parseBoolean(props.getProperty("enable.impact.analysis", String.valueOf(config.enableImpactAnalysis)));
         config.enableTransitiveApiDiscovery = Boolean.parseBoolean(props.getProperty("enable.transitive.api.discovery", String.valueOf(config.enableTransitiveApiDiscovery)));
         config.transitiveApiDiscoveryMaxDepth = Integer.parseInt(props.getProperty("transitive.api.discovery.max.depth", String.valueOf(config.transitiveApiDiscoveryMaxDepth)));
         config.transitiveApiDiscoveryMaxVisitedFiles = Integer.parseInt(props.getProperty("transitive.api.discovery.max.visited.files", String.valueOf(config.transitiveApiDiscoveryMaxVisitedFiles)));
@@ -122,6 +134,40 @@ public class Main {
         config.enableStructuralImpact = Boolean.parseBoolean(props.getProperty("enable.structural.impact", String.valueOf(config.enableStructuralImpact)));
         config.pmdPath = props.getProperty("pmd.path", config.pmdPath);
         config.pmdRulesetPath = props.getProperty("pmd.ruleset.path", config.pmdRulesetPath);
+        config.javaSourceVersion = Integer.parseInt(props.getProperty("java.source.version", String.valueOf(config.javaSourceVersion)));
+        config.springBootVersion = parseMajorVersion(props.getProperty("spring.boot.version", String.valueOf(config.springBootVersion)));
+        config.methodScopedDependencyGraph = Boolean.parseBoolean(props.getProperty("dependency.graph.scope.method", String.valueOf(config.methodScopedDependencyGraph)));
+        config.rebuildGraphCache = Boolean.parseBoolean(props.getProperty("rebuild.graph.cache", String.valueOf(config.rebuildGraphCache)));
+        config.graphCacheTtlHours = Integer.parseInt(props.getProperty("graph.cache.ttl.hours", String.valueOf(config.graphCacheTtlHours)));
+        config.transitiveCallerStructuralFallback = Boolean.parseBoolean(props.getProperty("transitive.caller.structural.fallback", String.valueOf(config.transitiveCallerStructuralFallback)));
+        config.useAstCallerDetection = Boolean.parseBoolean(props.getProperty("use.ast.caller.detection", String.valueOf(config.useAstCallerDetection)));
+        config.openApiSpecPaths = props.getProperty("openapi.spec.paths", config.openApiSpecPaths);
+        config.openApiDelegateSuffix = props.getProperty("openapi.delegate.suffix", config.openApiDelegateSuffix);
+        config.primaryLanguage = props.getProperty("primary.language", config.primaryLanguage).trim().toLowerCase();
+        config.enableRulesBugPatterns    = Boolean.parseBoolean(props.getProperty("enable.rules.bug.patterns",    String.valueOf(config.enableRulesBugPatterns)));
+        config.enableRulesNullSafety     = Boolean.parseBoolean(props.getProperty("enable.rules.null.safety",     String.valueOf(config.enableRulesNullSafety)));
+        config.enableRulesExceptions     = Boolean.parseBoolean(props.getProperty("enable.rules.exceptions",      String.valueOf(config.enableRulesExceptions)));
+        config.enableRulesLogging        = Boolean.parseBoolean(props.getProperty("enable.rules.logging",         String.valueOf(config.enableRulesLogging)));
+        config.enableRulesSpringBoot     = Boolean.parseBoolean(props.getProperty("enable.rules.spring.boot",     String.valueOf(config.enableRulesSpringBoot)));
+        config.enableRulesSecurity       = Boolean.parseBoolean(props.getProperty("enable.rules.security",        String.valueOf(config.enableRulesSecurity)));
+        config.enableRulesOpenApi        = Boolean.parseBoolean(props.getProperty("enable.rules.openapi",         String.valueOf(config.enableRulesOpenApi)));
+        config.enableRulesPerformance    = Boolean.parseBoolean(props.getProperty("enable.rules.performance",     String.valueOf(config.enableRulesPerformance)));
+        config.enableRulesCodeQuality    = Boolean.parseBoolean(props.getProperty("enable.rules.code.quality",    String.valueOf(config.enableRulesCodeQuality)));
+        config.enableRulesSoap           = Boolean.parseBoolean(props.getProperty("enable.rules.soap",            String.valueOf(config.enableRulesSoap)));
+        config.enableRulesGrpc           = Boolean.parseBoolean(props.getProperty("enable.rules.grpc",            String.valueOf(config.enableRulesGrpc)));
+        config.enableRulesOutboundClient = Boolean.parseBoolean(props.getProperty("enable.rules.outbound.client", String.valueOf(config.enableRulesOutboundClient)));
+        config.enableRulesScheduled      = Boolean.parseBoolean(props.getProperty("enable.rules.scheduled",       String.valueOf(config.enableRulesScheduled)));
+    }
+
+    private static int parseMajorVersion(String value) {
+        if (value == null || value.isBlank()) return 3;
+        String major = value.trim().split("\\.")[0];
+        try {
+            return Integer.parseInt(major);
+        } catch (NumberFormatException e) {
+            ColorConsole.warning("Invalid spring.boot.version value '" + value + "', defaulting to 3");
+            return 3;
+        }
     }
 
     private static void openReport(String reportPath) {

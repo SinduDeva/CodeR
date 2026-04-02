@@ -48,13 +48,14 @@ public class HtmlReportGenerator {
         html.append("<div class='main-content'>\n");
         html.append("<div class='content'>\n");
         appendStatusBanner(html, blocked, mustFix, shouldFix);
+        appendRiskSummary(html, findings);
         if (config.showTestingScope) {
             appendTestingNotes(html, testingStatusByFile);
         }
 
         int fileIndex = 0;
         for (ChangedFile f : files) {
-            appendFileSection(html, f, fileIndex++, findingsByFile, impactByFile, reverseDependencyGraph, testingStatusByFile);
+            appendFileSection(html, f, fileIndex++, findingsByFile, impactByFile, reverseDependencyGraph, testingStatusByFile, config.methodScopedDependencyGraph, config.enableImpactAnalysis);
         }
         
         if (files.isEmpty()) {
@@ -279,6 +280,17 @@ public class HtmlReportGenerator {
         html.append(".theme-toggle .theme-thumb { position: absolute; top: 4px; left: 6px; width: 24px; height: 24px; border-radius: 999px; background: var(--toggle-thumb); box-shadow: 0 2px 4px rgba(0,0,0,0.2); transition: transform 0.2s ease; }\n");
         html.append(".theme-toggle[data-theme='dark'] .theme-thumb { transform: translateX(34px); }\n");
         html.append(".theme-toggle:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }\n");
+        // Risk summary panel
+        html.append(".risk-summary { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; padding: 14px 18px; border-radius: 10px; background: var(--bg-content); border: 1px solid var(--border-color); box-shadow: var(--card-shadow); }\n");
+        html.append(".risk-summary-title { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 4px; }\n");
+        html.append(".risk-summary-grid { display: flex; flex-wrap: wrap; gap: 8px; }\n");
+        html.append(".risk-item { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 8px; background: var(--bg-muted); border: 1px solid var(--border-color); }\n");
+        html.append(".risk-cat-label { font-size: 13px; font-weight: 500; color: var(--text-secondary); }\n");
+        html.append(".risk-badges { display: flex; gap: 4px; }\n");
+        html.append(".risk-badge { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 10px; }\n");
+        html.append(".risk-critical { background: var(--severity-critical-bg); color: var(--severity-critical-text); }\n");
+        html.append(".risk-warning  { background: var(--severity-warning-bg);  color: var(--severity-warning-text);  }\n");
+        html.append(".risk-info     { background: var(--severity-consider-bg); color: var(--severity-consider-text); }\n");
         html.append("</style>\n");
     }
 
@@ -338,6 +350,48 @@ public class HtmlReportGenerator {
         }
     }
 
+    private static void appendRiskSummary(StringBuilder html, List<Finding> findings) {
+        if (findings == null || findings.isEmpty()) return;
+
+        // Count by category × severity
+        Map<Category, long[]> counts = new LinkedHashMap<>();
+        for (Category cat : Category.values()) counts.put(cat, new long[]{0, 0, 0});
+        for (Finding f : findings) {
+            if (f.category == null) continue;
+            long[] c = counts.get(f.category);
+            if (c == null) continue;
+            if (f.severity == Severity.MUST_FIX)      c[0]++;
+            else if (f.severity == Severity.SHOULD_FIX) c[1]++;
+            else                                        c[2]++;
+        }
+
+        List<Map.Entry<Category, long[]>> active = counts.entrySet().stream()
+            .filter(e -> e.getValue()[0] + e.getValue()[1] + e.getValue()[2] > 0)
+            .collect(Collectors.toList());
+        if (active.isEmpty()) return;
+
+        html.append("<div class='risk-summary'>\n");
+        html.append("  <div class='risk-summary-title'>Issues by category</div>\n");
+        html.append("  <div class='risk-summary-grid'>\n");
+        for (Map.Entry<Category, long[]> e : active) {
+            long[] c = e.getValue();
+            html.append("    <div class='risk-item'>\n");
+            html.append("      <span class='risk-cat-label'>").append(formatCategoryLabel(e.getKey())).append("</span>\n");
+            html.append("      <span class='risk-badges'>");
+            if (c[0] > 0) html.append("<span class='risk-badge risk-critical'>").append(c[0]).append("</span>");
+            if (c[1] > 0) html.append("<span class='risk-badge risk-warning'>").append(c[1]).append("</span>");
+            if (c[2] > 0) html.append("<span class='risk-badge risk-info'>").append(c[2]).append("</span>");
+            html.append("</span>\n");
+            html.append("    </div>\n");
+        }
+        html.append("  </div>\n");
+        html.append("</div>\n");
+    }
+
+    private static String formatCategoryLabel(Category cat) {
+        return cat.displayName;
+    }
+
     private static void appendTestingNotes(StringBuilder html, Map<String, TestingStatus> statusMap) {
         if (statusMap == null || statusMap.isEmpty()) return;
         long withTests = statusMap.values().stream().filter(s -> s.hasTests).count();
@@ -350,7 +404,7 @@ public class HtmlReportGenerator {
         html.append("</ul>\n</div>\n");
     }
 
-    private static void appendFileSection(StringBuilder html, ChangedFile f, int index, Map<String, List<Finding>> findingsByFile, Map<String, ImpactEntry> impactByFile, Map<String, Set<String>> reverseGraph, Map<String, TestingStatus> statusMap) {
+    private static void appendFileSection(StringBuilder html, ChangedFile f, int index, Map<String, List<Finding>> findingsByFile, Map<String, ImpactEntry> impactByFile, Map<String, Set<String>> reverseGraph, Map<String, TestingStatus> statusMap, boolean methodScopedGraph, boolean showImpact) {
         String active = (index == 0) ? " active" : "";
         html.append("<div class='file-content").append(active).append("' id='file-").append(index).append("'>\n");
         html.append("<h2>").append(escapeHtml(f.name)).append("</h2>\n");
@@ -374,8 +428,8 @@ public class HtmlReportGenerator {
             impact = impactByFile.get(simpleName);
         }
 
-        if (impact != null) {
-            appendImpactMap(html, impact, f, reverseGraph);
+        if (showImpact && impact != null) {
+            appendImpactMap(html, impact, f, reverseGraph, methodScopedGraph);
         }
 
         if (fileFindings.isEmpty()) {
@@ -423,7 +477,7 @@ public class HtmlReportGenerator {
     }
 
     private static void appendFloatingSummaryBox(StringBuilder html, ImpactEntry impact, List<String> displayFunctions, List<String> displayNotes) {
-        int total = impact.endpoints.size() + displayFunctions.size() + displayNotes.size() + impact.recommendedTests.size();
+        int total = impact.endpoints.size() + displayFunctions.size() + displayNotes.size();
         if (total == 0) {
             html.append("<div class='floating-summary hidden'></div>");
             return;
@@ -631,7 +685,7 @@ public class HtmlReportGenerator {
         else sb.append(start).append('-').append(end);
     }
 
-    private static void appendImpactMap(StringBuilder html, ImpactEntry impact, ChangedFile f, Map<String, Set<String>> reverseGraph) {
+    private static void appendImpactMap(StringBuilder html, ImpactEntry impact, ChangedFile f, Map<String, Set<String>> reverseGraph, boolean methodScopedGraph) {
         html.append("<div class='impact-map'>\n");
         if (!impact.layers.isEmpty()) {
             html.append("<div class='impact-row'><span class='impact-label'>Layers:</span><span>");
@@ -645,27 +699,58 @@ public class HtmlReportGenerator {
         //appendImpactSummary(html, impact, displayFunctions, displayNotes);
         appendFloatingSummaryBox(html, impact, displayFunctions, displayNotes);
 
-        String apiSubtitle = "Endpoints touched";
-        boolean hasPotential = impact.endpoints.stream().anyMatch(e -> e != null && e.startsWith("Potential:"));
-        if (hasPotential) {
-            apiSubtitle = "Endpoints touched (includes Potential)";
+        // Consolidate APIs by method with layer grouping
+        if (impact.endpointsByMethod.size() > 1) {
+            // Multiple methods: show each method as a header with its impacted APIs underneath
+            appendImpactedApisGroupedByMethod(html, impact);
+        } else {
+            String apiSubtitle = "Endpoints touched";
+            boolean hasPotential = impact.endpoints.stream().anyMatch(e -> e != null && e.startsWith("Potential:"));
+            if (hasPotential) {
+                apiSubtitle = "Endpoints touched (includes Potential)";
+            }
+            appendCollapsibleList(html, "Impacted APIs", apiSubtitle, impact.endpoints, "api");
         }
-        appendCollapsibleList(html, "Impacted APIs", apiSubtitle, impact.endpoints, "api");
-        appendCollapsibleList(html, "Modified Methods", methodSummarySubtitle(displayNotes, displayFunctions.size()), displayFunctions, "methods");
-        appendCollapsibleList(html, "Impact Notes", "Contextual insights", displayNotes, "notes");
-        appendCollapsibleList(html, "Related Tests", impact.recommendedTests.isEmpty() ? "No mapped tests" : "Tests to run", impact.recommendedTests, "tests");
+        
+        // appendCollapsibleList(html, "Modified Methods", methodSummarySubtitle(displayNotes, displayFunctions.size()), displayFunctions, "methods");
+        appendCollapsibleList(html, "Modified Methods", "", displayFunctions, "methods");
+        
+        // Consolidate impact notes by method with headers
+        if (impact.notesByMethod.size() > 1) {
+            appendImpactNotesGroupedByMethod(html, impact);
+        } else {
+            appendCollapsibleList(html, "Impact Notes", "Contextual insights", displayNotes, "notes");
+        }
 
-        // Reverse Dependency Graph Visualization
-        String impactKey = null;
-        if (impact != null && impact.fullyQualifiedName != null && !impact.fullyQualifiedName.isBlank()) {
-            impactKey = impact.fullyQualifiedName;
+        // Dependency Graph Visualization
+        String impactKey = (impact.fullyQualifiedName != null && !impact.fullyQualifiedName.isBlank())
+            ? impact.fullyQualifiedName : f.name.replace(".java", "");
+
+        // Decide which set of dependents to display based on config.
+        // Method-scoped: only files proven to call a changed method (precise, default).
+        // Class-level:   all files that import/reference the class (broad, may include noise).
+        // Always fall back to class-level if method-scoped list is empty
+        // (e.g. no touched methods were identified, or the changed file is a controller itself).
+        Set<String> classLevelDeps = reverseGraph == null ? Collections.emptySet()
+            : reverseGraph.getOrDefault(impactKey, reverseGraph.getOrDefault(f.name.replace(".java", ""), Collections.emptySet()));
+
+        boolean usingMethodScope = methodScopedGraph && !impact.methodScopedDependents.isEmpty();
+        Set<String> dependents;
+        String graphTitle;
+        String graphSubtitle;
+        if (usingMethodScope) {
+            dependents = new LinkedHashSet<>(impact.methodScopedDependents);
+            graphTitle  = "Method-Scoped Dependents";
+            graphSubtitle = "Files calling changed methods";
+        } else {
+            dependents = classLevelDeps;
+            graphTitle  = "Class-Level Dependents";
+            graphSubtitle = methodScopedGraph
+                ? "All class references (no method callers found)"
+                : "All files referencing this class";
         }
-        if (impactKey == null) {
-            impactKey = f.name.replace(".java", "");
-        }
-        Set<String> dependents = reverseGraph == null ? Collections.emptySet() :
-            reverseGraph.getOrDefault(impactKey, reverseGraph.getOrDefault(f.name.replace(".java", ""), Collections.emptySet()));
-        appendCollapsibleGraph(html, impactKey, dependents);
+
+        appendCollapsibleGraph(html, impactKey, dependents, graphTitle, graphSubtitle);
         html.append("</div>\n");
     }
 
@@ -691,7 +776,7 @@ public class HtmlReportGenerator {
         html.append("</ul></div></div>");
     }
 
-    private static void appendCollapsibleGraph(StringBuilder html, String impactKey, Set<String> dependents) {
+    private static void appendCollapsibleGraph(StringBuilder html, String impactKey, Set<String> dependents, String title, String subtitle) {
         if (dependents == null || dependents.isEmpty()) return;
         List<String> prodDeps = new ArrayList<>();
         List<String> testDeps = new ArrayList<>();
@@ -706,7 +791,12 @@ public class HtmlReportGenerator {
         String cardId = "graph-" + UUID.randomUUID().toString().replace("-", "");
         html.append("<div class='collapsible-card' id='").append(cardId).append("'>");
         html.append("<div class='collapsible-header' onclick=\"toggleCard('").append(cardId).append("')\">");
-        html.append("<span>Reverse Dependency Mapping</span>");
+        html.append("<div class='collapsible-title'>");
+        html.append("<span>").append(escapeHtml(title)).append("</span>");
+        if (subtitle != null && !subtitle.isBlank()) {
+            html.append("<span class='title-subtext'>").append(escapeHtml(subtitle)).append("</span>");
+        }
+        html.append("</div>");
         html.append("<span class='inline-count api'>").append(dependents.size()).append("</span>");
         html.append("<span class='chevron'>&#9662;</span>");
         html.append("</div>");
@@ -795,6 +885,81 @@ public class HtmlReportGenerator {
     private static String truncate(String s, int len) {
         if (s == null || s.length() <= len) return s;
         return s.substring(0, len) + "...";
+    }
+
+    private static void appendImpactedApisGroupedByMethod(StringBuilder html, ImpactEntry impact) {
+        html.append("<div class='impact-section'>\n");
+        html.append("<h3 style='margin-top: 0; margin-bottom: 12px; font-size: 14px; font-weight: 600; color: var(--text-primary);'>Impacted APIs</h3>\n");
+        
+        for (Map.Entry<String, List<String>> methodEntry : impact.endpointsByMethod.entrySet()) {
+            String methodName = methodEntry.getKey();
+            List<String> endpoints = methodEntry.getValue();
+            
+            // Method header
+            html.append("<div style='margin-bottom: 12px;'>\n");
+            html.append("<div style='padding: 8px 12px; background-color: var(--bg-muted); border-left: 3px solid var(--accent-primary); border-radius: 4px; margin-bottom: 8px;'>\n");
+            html.append("<span style='font-size: 12px; font-weight: 600; color: var(--text-secondary);'>").append(escapeHtml(methodName)).append("()</span>\n");
+            html.append("</div>\n");
+            
+            // APIs under this method
+            html.append("<ul style='margin: 0; padding-left: 20px; list-style: none;'>\n");
+            for (String endpoint : endpoints) {
+                html.append("<li style='padding: 4px 0; font-size: 13px; color: var(--text-secondary);'>");
+                html.append("<code style='background-color: var(--bg-code); color: #60a5fa; padding: 2px 6px; border-radius: 3px; font-size: 12px;'>");
+                html.append(escapeHtml(endpoint));
+                html.append("</code></li>\n");
+            }
+            html.append("</ul>\n");
+            html.append("</div>\n");
+        }
+        
+        html.append("</div>\n");
+    }
+
+    private static void appendImpactNotesGroupedByMethod(StringBuilder html, ImpactEntry impact) {
+        html.append("<div class='impact-section'>\n");
+        html.append("<h3 style='margin-top: 0; margin-bottom: 12px; font-size: 14px; font-weight: 600; color: var(--text-primary);'>Impact Notes</h3>\n");
+        html.append("<p style='margin: 0 0 12px 0; font-size: 12px; color: var(--text-muted);'>Contextual insights</p>\n");
+        
+        for (Map.Entry<String, List<String>> methodEntry : impact.notesByMethod.entrySet()) {
+            String methodName = methodEntry.getKey();
+            List<String> notes = methodEntry.getValue();
+            
+            // Method header
+            html.append("<div style='margin-bottom: 12px;'>\n");
+            html.append("<div style='padding: 8px 12px; background-color: var(--bg-muted); border-left: 3px solid var(--accent-warning); border-radius: 4px; margin-bottom: 8px;'>\n");
+            html.append("<span style='font-size: 12px; font-weight: 600; color: var(--text-secondary);'>").append(escapeHtml(methodName)).append("()</span>\n");
+            html.append("</div>\n");
+            
+            // Notes under this method
+            html.append("<ul style='margin: 0; padding-left: 20px; list-style: disc;'>\n");
+            for (String note : notes) {
+                html.append("<li style='padding: 4px 0; font-size: 13px; color: var(--text-secondary); line-height: 1.4;'>");
+                html.append(escapeHtml(note));
+                html.append("</li>\n");
+            }
+            html.append("</ul>\n");
+            html.append("</div>\n");
+        }
+        
+        html.append("</div>\n");
+    }
+
+    private static String extractLayerFromEndpoint(String endpoint, List<String> availableLayers) {
+        if (endpoint == null || endpoint.isEmpty()) return "";
+        // Check if endpoint contains any of the available layers
+        for (String layer : availableLayers) {
+            if (endpoint.contains(layer)) return layer;
+        }
+        // Heuristic: infer layer from endpoint pattern
+        if (endpoint.startsWith("SOAP:")) return "SOAP";
+        if (endpoint.startsWith("gRPC:")) return "gRPC Client";
+        if (endpoint.contains("Feign:")) return "Feign Client";
+        if (endpoint.startsWith("GET ") || endpoint.startsWith("POST ") || endpoint.startsWith("PUT ") 
+            || endpoint.startsWith("DELETE ") || endpoint.startsWith("PATCH ") || endpoint.startsWith("HTTP ")) {
+            return "API/Web";
+        }
+        return "API/Web"; // Default
     }
 
     private static void appendScripts(StringBuilder html) {

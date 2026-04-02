@@ -64,13 +64,17 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo   Copying supporting files...
-echo Copying "%REPO_DIR%run-reviewer.bat" to "%INSTALL_DIR%\review.bat"
-copy /y "%REPO_DIR%run-reviewer.bat" "%INSTALL_DIR%\review.bat"
-dir "%INSTALL_DIR%\review.bat"
 copy /y "%REPO_DIR%run-reviewer.bat" "%INSTALL_DIR%\review.bat" >nul
 copy /y "%SRC_DIR%\pre-commit" "%INSTALL_DIR%\pre-commit" >nul
 if exist "%REPO_DIR%.code-reviewer.properties" (
     copy /y "%REPO_DIR%.code-reviewer.properties" "%INSTALL_DIR%\.code-reviewer.properties" >nul
+)
+
+:: Copy dependency JARs (e.g. javaparser-core.jar) so they are on the runtime classpath
+if exist "%REPO_DIR%lib" (
+    echo   [INFO] Copying dependency JARs...
+    if not exist "%INSTALL_DIR%\lib" mkdir "%INSTALL_DIR%\lib"
+    xcopy /s /y "%REPO_DIR%lib\*" "%INSTALL_DIR%\lib\" >nul
 )
 
 :: Copy PMD configuration

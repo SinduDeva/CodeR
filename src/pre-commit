@@ -6,7 +6,7 @@ printf "  |       Pre-Commit Code Review           |\n"
 printf "  +---------------------------------------+\n"
 printf "\n"
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& './run-reviewer.bat'; exit \$LASTEXITCODE"
+cmd.exe /c "./run-reviewer.bat"
 status=$?
 
 if [ $status -ne 0 ]; then
